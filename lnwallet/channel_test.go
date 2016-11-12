@@ -668,6 +668,35 @@ func TestStateUpdatePersistence(t *testing.T) {
 			bobBalance)
 	}
 
+	// The values for satoshis sent and received should have been updated accordingly
+	aliceSatoshisSent := aliceChannel.channelState.TotalSatoshisSent
+	expectedAliceSatoshisSent := uint64(3000)
+	if aliceSatoshisSent != expectedAliceSatoshisSent {
+		t.Fatalf("expected %v alice satoshis sent, got %v", expectedAliceSatoshisSent,
+			aliceSatoshisSent)
+	}
+
+	aliceSatoshisReceived := aliceChannel.channelState.TotalSatoshisReceived
+	expectedAliceSatoshisReceived := uint64(1000)
+	if aliceSatoshisReceived != expectedAliceSatoshisReceived {
+		t.Fatalf("expected %v alice satoshis received, got %v", expectedAliceSatoshisReceived,
+			aliceSatoshisReceived)
+	}
+
+	bobSatoshisSent := bobChannel.channelState.TotalSatoshisSent
+	expectedBobSatoshisSent := uint64(1000)
+	if bobSatoshisSent != expectedBobSatoshisSent {
+		t.Fatalf("expected %v bob satoshis sent, got %v", expectedBobSatoshisSent,
+			bobSatoshisSent)
+	}
+
+	bobSatoshisReceived := bobChannel.channelState.TotalSatoshisReceived
+	expectedBobSatoshisReceived := uint64(3000)
+	if bobSatoshisReceived != expectedBobSatoshisReceived {
+		t.Fatalf("expected %v bob satoshis received, got %v", expectedBobSatoshisReceived,
+			bobSatoshisReceived)
+	}
+
 	// The latest commitment from both sides should have all the HTLC's.
 	numAliceOutgoing := aliceChannel.localCommitChain.tail().outgoingHTLCs
 	numAliceIncoming := aliceChannel.localCommitChain.tail().incomingHTLCs
@@ -785,4 +814,32 @@ func TestStateUpdatePersistence(t *testing.T) {
 		t.Fatalf("expected %v bob balance, got %v", expectedBobBalance,
 			bobBalance)
 	}
+
+	// The values for satoshis sent and received should have been updated accordingly
+	aliceSatoshisSent = aliceChannelNew.channelState.TotalSatoshisSent
+	expectedAliceSatoshisSent = uint64(3000)
+	if aliceSatoshisSent != expectedAliceSatoshisSent {
+		t.Fatalf("expected %v alice satoshis sent, got %v", expectedAliceSatoshisSent,
+			aliceSatoshisSent)
+	}
+	aliceSatoshisReceived = aliceChannelNew.channelState.TotalSatoshisReceived
+	expectedAliceSatoshisReceived = uint64(1000)
+	if aliceSatoshisReceived != expectedAliceSatoshisReceived {
+		t.Fatalf("expected %v alice satoshis received, got %v", expectedAliceSatoshisReceived,
+			aliceSatoshisReceived)
+	}
+
+	bobSatoshisSent = bobChannelNew.channelState.TotalSatoshisSent
+	expectedBobSatoshisSent = uint64(1000)
+	if bobSatoshisSent != expectedBobSatoshisSent {
+		t.Fatalf("expected %v bob satoshis sent, got %v", expectedAliceSatoshisSent,
+			aliceSatoshisSent)
+	}
+	bobSatoshisReceived = bobChannelNew.channelState.TotalSatoshisReceived
+	expectedBobSatoshisReceived = uint64(3000)
+	if bobSatoshisReceived != expectedBobSatoshisReceived {
+		t.Fatalf("expected %v bob satoshis received, got %v", expectedBobSatoshisReceived,
+			bobSatoshisReceived)
+	}
+
 }

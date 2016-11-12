@@ -183,9 +183,17 @@ type commitment struct {
 	// [our|their]Balance represents the settled balances at this point
 	// within the commitment chain. This balance is computed by properly
 	// evaluating all the add/remove/settle log entries before the listed
-	// indexes.
+	// indices.
 	ourBalance   btcutil.Amount
 	theirBalance btcutil.Amount
+
+	// htlcs is the set of HTLC's which remain unsettled within this
+	// totalSatoshis[Sent/Received] are the number of satoshis that have
+	// been sent across the channel at this point within the commitment
+	// chain. These amounts are computed by evaluating all of the
+	// add/remove/settle log entries before the listed indices.
+	totalSatoshisSent     uint64
+	totalSatoshisReceived uint64
 
 	// htlcs is the set of HTLC's which remain uncleared within this
 	// commitment.
@@ -199,10 +207,12 @@ type commitment struct {
 func (c *commitment) toChannelDelta() (*channeldb.ChannelDelta, error) {
 	numHtlcs := len(c.outgoingHTLCs) + len(c.incomingHTLCs)
 	delta := &channeldb.ChannelDelta{
-		LocalBalance:  c.ourBalance,
-		RemoteBalance: c.theirBalance,
-		UpdateNum:     uint32(c.height),
-		Htlcs:         make([]*channeldb.HTLC, 0, numHtlcs),
+		LocalBalance:          c.ourBalance,
+		RemoteBalance:         c.theirBalance,
+		TotalSatoshisSent:     c.totalSatoshisSent,
+		TotalSatoshisReceived: c.totalSatoshisReceived,
+		UpdateNum:             uint32(c.height),
+		Htlcs:                 make([]*channeldb.HTLC, 0, numHtlcs),
 	}
 
 	for _, htlc := range c.outgoingHTLCs {
@@ -298,7 +308,7 @@ func (s *commitmentChain) tail() *commitment {
 //
 // The state machine has for main methods:
 //  * .SignNextCommitment()
-//    * Called one one wishes to sign the next commitment, either initiating a
+//    * Called when one wishes to sign the next commitment, either initiating a
 //      new state update, or responding to a received commitment.
 /// * .ReceiveNewCommitment()
 //    * Called upon receipt of a new commitment from the remote party. If the
@@ -618,12 +628,18 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 
 	// TODO(roasbeef): don't assume view is always fetched from tip?
 	var ourBalance, theirBalance btcutil.Amount
+	var satoshisSent, satoshisReceived uint64
+
 	if commitChain.tip() == nil {
 		ourBalance = lc.channelState.OurBalance
 		theirBalance = lc.channelState.TheirBalance
+		satoshisSent = lc.channelState.TotalSatoshisSent
+		satoshisReceived = lc.channelState.TotalSatoshisReceived
 	} else {
 		ourBalance = commitChain.tip().ourBalance
 		theirBalance = commitChain.tip().theirBalance
+		satoshisSent = commitChain.tip().totalSatoshisSent
+		satoshisReceived = commitChain.tip().totalSatoshisReceived
 	}
 
 	nextHeight := commitChain.tip().height + 1
@@ -634,7 +650,7 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 	// TODO(roasbeef): error if log empty?
 	htlcView := lc.fetchHTLCView(theirLogIndex, ourLogIndex)
 	filteredHTLCView := lc.evaluateHTLCView(htlcView, &ourBalance, &theirBalance,
-		nextHeight, remoteChain)
+		&satoshisSent, &satoshisReceived, nextHeight, remoteChain)
 
 	var selfKey *btcec.PublicKey
 	var remoteKey *btcec.PublicKey
@@ -681,14 +697,16 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 	txsort.InPlaceSort(commitTx)
 
 	return &commitment{
-		txn:               commitTx,
-		height:            nextHeight,
-		ourBalance:        ourBalance,
-		ourMessageIndex:   ourLogIndex,
-		theirMessageIndex: theirLogIndex,
-		theirBalance:      theirBalance,
-		outgoingHTLCs:     filteredHTLCView.ourUpdates,
-		incomingHTLCs:     filteredHTLCView.theirUpdates,
+		txn:                   commitTx,
+		height:                nextHeight,
+		ourBalance:            ourBalance,
+		ourMessageIndex:       ourLogIndex,
+		theirMessageIndex:     theirLogIndex,
+		theirBalance:          theirBalance,
+		totalSatoshisSent:     satoshisSent,
+		totalSatoshisReceived: satoshisReceived,
+		outgoingHTLCs:         filteredHTLCView.ourUpdates,
+		incomingHTLCs:         filteredHTLCView.theirUpdates,
 	}, nil
 }
 
@@ -698,7 +716,8 @@ func (lc *LightningChannel) fetchCommitmentView(remoteChain bool,
 // reflects the current state of htlc's within the remote or local commitment
 // chain.
 func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
-	theirBalance *btcutil.Amount, nextHeight uint64, remoteChain bool) *htlcView {
+	theirBalance *btcutil.Amount, satoshisSent, satoshisReceived *uint64,
+	nextHeight uint64, remoteChain bool) *htlcView {
 
 	newView := &htlcView{}
 
@@ -720,8 +739,8 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 		addEntry := lc.theirLogIndex[entry.ParentIndex].Value.(*PaymentDescriptor)
 
 		skipThem[addEntry.Index] = struct{}{}
-		processRemoveEntry(entry, ourBalance, theirBalance,
-			nextHeight, remoteChain, true)
+		processRemoveEntry(entry, ourBalance, theirBalance, satoshisSent,
+			satoshisReceived, nextHeight, remoteChain, true)
 	}
 	for _, entry := range view.theirUpdates {
 		if entry.EntryType == Add {
@@ -731,8 +750,8 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 		addEntry := lc.ourLogIndex[entry.ParentIndex].Value.(*PaymentDescriptor)
 
 		skipUs[addEntry.Index] = struct{}{}
-		processRemoveEntry(entry, ourBalance, theirBalance,
-			nextHeight, remoteChain, false)
+		processRemoveEntry(entry, ourBalance, theirBalance, satoshisSent,
+			satoshisReceived, nextHeight, remoteChain, false)
 	}
 
 	// Next we take a second pass through all the log entries, skipping any
@@ -744,8 +763,8 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			continue
 		}
 
-		processAddEntry(entry, ourBalance, theirBalance, nextHeight,
-			remoteChain, false)
+		processAddEntry(entry, ourBalance, theirBalance, satoshisSent,
+			satoshisReceived, nextHeight, remoteChain, false)
 		newView.ourUpdates = append(newView.ourUpdates, entry)
 	}
 	for _, entry := range view.theirUpdates {
@@ -754,8 +773,8 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 			continue
 		}
 
-		processAddEntry(entry, ourBalance, theirBalance, nextHeight,
-			remoteChain, true)
+		processAddEntry(entry, ourBalance, theirBalance, satoshisSent,
+			satoshisReceived, nextHeight, remoteChain, true)
 		newView.theirUpdates = append(newView.theirUpdates, entry)
 	}
 
@@ -767,7 +786,8 @@ func (lc *LightningChannel) evaluateHTLCView(view *htlcView, ourBalance,
 // was commited is updated. Keeping track of this inclusion height allows us to
 // later compact the log once the change is fully committed in both chains.
 func processAddEntry(htlc *PaymentDescriptor, ourBalance, theirBalance *btcutil.Amount,
-	nextHeight uint64, remoteChain bool, isIncoming bool) {
+	satoshisSent, satoshisReceived *uint64, nextHeight uint64, remoteChain bool,
+	isIncoming bool) {
 
 	// If we're evaluating this entry for the remote chain (to create/view
 	// a new commitment), then we'll may be updating the height this entry
@@ -789,10 +809,12 @@ func processAddEntry(htlc *PaymentDescriptor, ourBalance, theirBalance *btcutil.
 		// to update their balance accordingly by subtracting the
 		// amount of the HTLC that are funds pending.
 		*theirBalance -= htlc.Amount
+		*satoshisReceived += uint64(htlc.Amount)
 	} else {
 		// Similarly, we need to debit our balance if this is an out
 		// going HTLC to reflect the pending balance.
 		*ourBalance -= htlc.Amount
+		*satoshisSent += uint64(htlc.Amount)
 	}
 
 	*addHeight = nextHeight
@@ -802,8 +824,8 @@ func processAddEntry(htlc *PaymentDescriptor, ourBalance, theirBalance *btcutil.
 // previously added HTLC. If the removal entry has already been processed, it
 // is skipped.
 func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
-	theirBalance *btcutil.Amount, nextHeight uint64,
-	remoteChain bool, isIncoming bool) {
+	theirBalance *btcutil.Amount, satoshisSent, satoshisReceived *uint64,
+	nextHeight uint64, remoteChain bool, isIncoming bool) {
 
 	var removeHeight *uint64
 	if remoteChain {
@@ -817,6 +839,9 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 		return
 	}
 
+	// TODO(bryanvu): add to AddSettleWorkflow test to check if
+	// received/sent amounts are calculated correctly in the case of
+	// Timeouts or Settlements
 	switch {
 	// If an incoming HTLC is being settled, then this means that we've
 	// received the preimage either from another sub-system, or the
@@ -828,6 +853,7 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 	// HTLC should return to the remote party.
 	case isIncoming && htlc.EntryType == Timeout:
 		*theirBalance += htlc.Amount
+		*satoshisReceived -= uint64(htlc.Amount)
 	// If an outgoing HTLC is being settled, then this means that the
 	// downstream party resented the preimage or learned of it via a
 	// downstream peer. In either case, we credit their settled value with
@@ -838,6 +864,7 @@ func processRemoveEntry(htlc *PaymentDescriptor, ourBalance,
 	// the HTLC should be returned to our settled balance.
 	case !isIncoming && htlc.EntryType == Timeout:
 		*ourBalance += htlc.Amount
+		*satoshisReceived -= uint64(htlc.Amount)
 	}
 
 	*removeHeight = nextHeight
@@ -876,6 +903,7 @@ func (lc *LightningChannel) SignNextCommitment() ([]byte, uint32, error) {
 		return nil, 0, err
 	}
 
+	// TODO(bryanvu): Add satoshis sent and received to the log?
 	walletLog.Tracef("ChannelPoint(%v): extending remote chain to height %v",
 		lc.channelState.ChanID, newCommitView.height)
 	walletLog.Tracef("ChannelPoint(%v): remote chain: our_balance=%v, "+
