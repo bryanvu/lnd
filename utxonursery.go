@@ -603,6 +603,80 @@ func sweepGraduatingOutputs(wallet *lnwallet.LightningWallet, kgtnOutputs []*kid
 	return nil
 }
 
+// waitForGraduation() is intended to be run as a goroutine that will wait until
+// a channel force close commitment transaction has been included in a confirmed
+// block. Once the transaction has been confirmed (as reported by the Chain Notifier),
+// waitForGraduation() will delete the output from the "preschool" database bucket
+// and atomically add it to the "kindergarten" database bucket.
+func (u *utxoNursery) waitForGraduation(confChan *chainntnfs.ConfirmationEvent, kgtnOutput *kidOutput) {
+	confHeight, ok := <-confChan.Confirmed
+	if !ok {
+		utxnLog.Errorf("notification chan "+
+			"closed, can't advance output %v", kgtnOutput.outPoint)
+		return
+	}
+
+	utxnLog.Infof("Outpoint %v confirmed in block %v moving to kindergarten",
+		kgtnOutput.outPoint, confHeight)
+
+	kgtnOutput.confHeight = uint32(confHeight)
+
+	// The following block deletes a kidOutput from the preschool database bucket
+	// and adds it to the kindergarten database bucket which is keyed by block
+	// height. Keys and values are serialized into byte array form prior to
+	// database insertion.
+	err := u.db.Update(func(tx *bolt.Tx) error {
+		psclBucket := tx.Bucket(preschoolBucket)
+		if psclBucket == nil {
+			utxnLog.Errorf("unable to open preschool bucket")
+		}
+
+		var outpointBytes bytes.Buffer
+		if err := writeOutpoint(&outpointBytes, &kgtnOutput.outPoint); err != nil {
+			utxnLog.Errorf("unable to serialize kid outpoint: %v",
+				kgtnOutput.outPoint)
+		}
+
+		if err := psclBucket.Delete(outpointBytes.Bytes()); err != nil {
+			utxnLog.Errorf(`unable to delete kindergarten output from
+				preschool bucket: %v`, kgtnOutput.outPoint)
+		}
+
+		kgtnBucket, err := tx.CreateBucketIfNotExists(kindergartenBucket)
+		if err != nil {
+			return err
+		}
+
+		// TODO(roasbeef): your off-by-one sense are tingling...
+		maturityHeight := kgtnOutput.confHeight +
+			kgtnOutput.blocksToMaturity
+
+		heightBytes := make([]byte, 4)
+		byteOrder.PutUint32(heightBytes, uint32(maturityHeight))
+
+		var existingOutputs []byte
+		if results := kgtnBucket.Get(heightBytes); results != nil {
+			existingOutputs = results
+		}
+
+		var b bytes.Buffer
+		if err := addSerializedKidToList(&b, existingOutputs, kgtnOutput); err != nil {
+			utxnLog.Errorf("unable to add kid to list: ", kgtnOutput)
+		}
+
+		kgtnBucket.Put(heightBytes, b.Bytes())
+
+		utxnLog.Infof("Outpoint %v now in kindergarten, will mature "+
+			"at height %v (delay of %v)", kgtnOutput.outPoint,
+			maturityHeight, kgtnOutput.blocksToMaturity)
+		return nil
+	})
+	if err != nil {
+		utxnLog.Errorf("unable to move kid output from preschool bucket "+
+			"to kindergarten bucket: %v", err)
+	}
+}
+
 // createSweepTx creates a final sweeping transaction with all witnesses in
 // place for all inputs. The created transaction has a single output sending
 // all the funds back to the source wallet.

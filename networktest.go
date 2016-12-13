@@ -749,6 +749,7 @@ func (n *networkHarness) CloseChannel(ctx context.Context,
 
 	errChan := make(chan error)
 	fin := make(chan *chainhash.Hash)
+
 	go func() {
 		// Consume the "channel close" update in order to wait for the closing
 		// transaction to be broadcast, then wait for the closing tx to be seen
