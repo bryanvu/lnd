@@ -1,0 +1,21 @@
+diff --git a/networktest.go b/networktest.go
+index c95825b..685c895 100644
+--- a/networktest.go
++++ b/networktest.go
+@@ -226,13 +226,15 @@ func (l *lightningNode) start(lndError chan error) error {
+ 	}
+ 	copy(l.PubKey[:], pubkey)
+ 
++	fmt.Println("log dir: ", l.cfg.LogDir)
++
+ 	return nil
+ }
+ 
+ // cleanup cleans up all the temporary files created by the node's process.
+ func (l *lightningNode) cleanup() error {
+ 	dirs := []string{
+-		l.cfg.LogDir,
++		//l.cfg.LogDir,
+ 		l.cfg.DataDir,
+ 	}
+ 

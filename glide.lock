@@ -129,7 +129,7 @@ imports:
   subpackages:
   - unix
 - name: google.golang.org/grpc
-  version: 708a7f9f3283aa2d4f6132d287d78683babe55c8
+  version: 1.0.0
   subpackages:
   - grpclog
   - codes

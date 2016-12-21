@@ -339,6 +339,7 @@ message CloseStatusUpdate {
 
 message PendingUpdate {
     bytes txid = 1;
+    uint32 output_index = 2;
 }
 
 message OpenChannelRequest {

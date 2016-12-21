@@ -911,14 +911,6 @@ func testSingleFunderReservationWorkflowResponder(miner *rpctest.Harness,
 		t.Fatalf("funding outputs don't match: %#v vs %#v",
 			chanReservation.FundingOutpoint(), fundingOutpoint)
 	}
-
-	// Some period of time later, Bob presents us with an SPV proof
-	// attesting to an open channel. At this point Alice recognizes the
-	// channel, saves the state to disk, and creates the channel itself.
-	if _, err := chanReservation.FinalizeReservation(); err != nil {
-		t.Fatalf("unable to finalize reservation: %v", err)
-	}
-
 	// TODO(roasbeef): bob verify alice's sig
 }
 

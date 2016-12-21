@@ -185,6 +185,8 @@ type addCounterPartySigsMsg struct {
 	// version of the commitment transaction.
 	theirCommitmentSig []byte
 
+	completeChan chan *channeldb.OpenChannel
+
 	// NOTE: In order to avoid deadlocks, this channel MUST be buffered.
 	err chan error
 }
@@ -215,19 +217,7 @@ type addSingleFunderSigsMsg struct {
 	// the commitment transaction.
 	obsfucator [StateHintSize]byte
 
-	// NOTE: In order to avoid deadlocks, this channel MUST be buffered.
-	err chan error
-}
-
-// channelOpenMsg is the final message sent to finalize a single funder channel
-// workflow to which we are the responder to. This message is sent once the
-// remote peer deems the channel open, meaning it has reached a sufficient
-// number of confirmations in the blockchain.
-type channelOpenMsg struct {
-	pendingFundingID uint64
-
-	// TODO(roasbeef): move verification up to upper layer, yeh?
-	spvProof []byte
+	completeChan chan *channeldb.OpenChannel
 
 	// NOTE: In order to avoid deadlocks, this channel MUST be buffered.
 	err chan error
@@ -461,8 +451,6 @@ out:
 				l.handleSingleFunderSigs(msg)
 			case *addCounterPartySigsMsg:
 				l.handleFundingCounterPartySigs(msg)
-			case *channelOpenMsg:
-				l.handleChannelOpen(msg)
 			}
 		case <-l.quit:
 			// TODO: do some clean up
@@ -541,6 +529,7 @@ func (l *LightningWallet) handleFundingReserveRequest(req *initFundingReserveMsg
 	reservation.nodeAddr = req.nodeAddr
 	reservation.ourContribution.CsvDelay = req.csvDelay
 
+	reservation.partialState.NumConfsRequired = req.numConfs
 	reservation.partialState.IdentityPub = req.nodeID
 	reservation.partialState.LocalCsvDelay = req.csvDelay
 	reservation.partialState.OurDustLimit = req.ourDustLimit
@@ -1066,16 +1055,12 @@ func (l *LightningWallet) handleFundingCounterPartySigs(msg *addCounterPartySigs
 	// Add the complete funding transaction to the DB, in it's open bucket
 	// which will be used for the lifetime of this channel.
 	// TODO(roasbeef): revisit faul-tolerance of this flow
-	nodeAddr := res.nodeAddr
-	if err := res.partialState.FullSyncWithAddr(nodeAddr); err != nil {
+	if err := res.partialState.SyncPending(res.nodeAddr); err != nil {
 		msg.err <- err
 		return
 	}
 
-	// Create a goroutine to watch the chain so we can open the channel once
-	// the funding tx has enough confirmations.
-	go l.openChannelAfterConfirmations(res)
-
+	msg.completeChan <- res.partialState
 	msg.err <- nil
 }
 
@@ -1192,98 +1177,15 @@ func (l *LightningWallet) handleSingleFunderSigs(req *addSingleFunderSigsMsg) {
 	}
 	pendingReservation.ourCommitmentSig = sigTheirCommit
 
-	req.err <- nil
-}
-
-// handleChannelOpen completes a single funder reservation to which we are the
-// responder. This method saves the channel state to disk, finally "opening"
-// the channel by sending it over to the caller of the reservation via the
-// channel dispatch channel.
-func (l *LightningWallet) handleChannelOpen(req *channelOpenMsg) {
-	l.limboMtx.RLock()
-	res, ok := l.fundingLimbo[req.pendingFundingID]
-	l.limboMtx.RUnlock()
-	if !ok {
-		req.err <- fmt.Errorf("attempted to update non-existant " +
-			"funding state")
-		res.chanOpen <- nil
-		return
-	}
-
-	// Grab the mutex on the ChannelReservation to ensure thead-safety
-	res.Lock()
-	defer res.Unlock()
-
-	// Funding complete, this entry can be removed from limbo.
-	l.limboMtx.Lock()
-	delete(l.fundingLimbo, res.reservationID)
-	l.limboMtx.Unlock()
-
 	// Add the complete funding transaction to the DB, in it's open bucket
 	// which will be used for the lifetime of this channel.
-	if err := res.partialState.FullSyncWithAddr(res.nodeAddr); err != nil {
+	if err := pendingReservation.partialState.SyncPending(pendingReservation.nodeAddr); err != nil {
 		req.err <- err
-		res.chanOpen <- nil
 		return
 	}
 
-	// Finally, create and officially open the payment channel!
-	// TODO(roasbeef): CreationTime once tx is 'open'
-	channel, _ := NewLightningChannel(l.Signer, l.ChainIO, l.chainNotifier,
-		res.partialState)
-
-	res.chanOpen <- &openChanDetails{
-		channel: channel,
-	}
+	req.completeChan <- pendingReservation.partialState
 	req.err <- nil
-}
-
-// openChannelAfterConfirmations creates, and opens a payment channel after
-// the funding transaction created within the passed channel reservation
-// obtains the specified number of confirmations.
-func (l *LightningWallet) openChannelAfterConfirmations(res *ChannelReservation) {
-	// Register with the ChainNotifier for a notification once the funding
-	// transaction reaches `numConfs` confirmations.
-	txid := res.fundingTx.TxHash()
-	numConfs := uint32(res.numConfsToOpen)
-	confNtfn, _ := l.chainNotifier.RegisterConfirmationsNtfn(&txid, numConfs)
-
-	walletLog.Infof("Waiting for funding tx (txid: %v) to reach %v confirmations",
-		txid, numConfs)
-
-	// Wait until the specified number of confirmations has been reached,
-	// or the wallet signals a shutdown.
-	var (
-		confDetails *chainntnfs.TxConfirmation
-		ok          bool
-	)
-out:
-	select {
-	case confDetails, ok = <-confNtfn.Confirmed:
-		// Reading a falsey value for the second parameter indicates that
-		// the notifier is in the process of shutting down. Therefore, we
-		// don't count this as the signal that the funding transaction has
-		// been confirmed.
-		if !ok {
-			res.chanOpen <- nil
-			return
-		}
-
-		break out
-	case <-l.quit:
-		res.chanOpen <- nil
-		return
-	}
-
-	// Finally, create and officially open the payment channel!
-	// TODO(roasbeef): CreationTime once tx is 'open'
-	channel, _ := NewLightningChannel(l.Signer, l.ChainIO, l.chainNotifier,
-		res.partialState)
-	res.chanOpen <- &openChanDetails{
-		channel:     channel,
-		blockHeight: confDetails.BlockHeight,
-		txIndex:     confDetails.TxIndex,
-	}
 }
 
 // selectCoinsAndChange performs coin selection in order to obtain witness

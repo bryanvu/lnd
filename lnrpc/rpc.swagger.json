@@ -1302,6 +1302,10 @@
     "lnrpcPendingUpdate": {
       "type": "object",
       "properties": {
+        "output_index": {
+          "type": "integer",
+          "format": "int64"
+        },
         "txid": {
           "type": "string",
           "format": "byte"

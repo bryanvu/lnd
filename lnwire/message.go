@@ -27,7 +27,9 @@ const (
 	CmdSingleFundingResponse     = uint32(110)
 	CmdSingleFundingComplete     = uint32(120)
 	CmdSingleFundingSignComplete = uint32(130)
-	CmdSingleFundingOpenProof    = uint32(140)
+
+	// Command for locking a funded channel.
+	CmdFundingLocked = uint32(200)
 
 	// Commands for the workflow of cooperatively closing an active channel.
 	CmdCloseRequest  = uint32(300)
@@ -96,8 +98,6 @@ func makeEmptyMessage(command uint32) (Message, error) {
 		msg = &SingleFundingComplete{}
 	case CmdSingleFundingSignComplete:
 		msg = &SingleFundingSignComplete{}
-	case CmdSingleFundingOpenProof:
-		msg = &SingleFundingOpenProof{}
 	case CmdCloseRequest:
 		msg = &CloseRequest{}
 	case CmdCloseComplete:

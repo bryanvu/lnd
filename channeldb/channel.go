@@ -68,6 +68,7 @@ var (
 	satSentPrefix        = []byte("ssp")
 	satReceivedPrefix    = []byte("srp")
 	netFeesPrefix        = []byte("ntp")
+	isPendingPrefix      = []byte("pdg")
 
 	// chanIDKey stores the node, and channelID for an active channel.
 	chanIDKey = []byte("cik")
@@ -195,6 +196,9 @@ type OpenChannel struct {
 	// negotiate fees, or close the channel.
 	IsInitiator bool
 
+	// TODO(bvu): Add comment
+	IsPending bool
+
 	// FundingOutpoint is the outpoint of the final funding transaction.
 	FundingOutpoint *wire.OutPoint
 
@@ -209,6 +213,9 @@ type OpenChannel struct {
 	// FundingWitnessScript is the full witness script used within the
 	// funding transaction.
 	FundingWitnessScript []byte
+
+	// TODO(bvu): add comment
+	NumConfsRequired uint16
 
 	// LocalCsvDelay is the delay to be used in outputs paying to us within
 	// the commitment transaction. This value is to be always expressed in
@@ -310,7 +317,7 @@ func (c *OpenChannel) fullSync(tx *bolt.Tx) error {
 	return putOpenChannel(chanBucket, nodeChanBucket, c)
 }
 
-// FullSyncWithAddr is identical to the FullSync function in that it writes the
+// SyncPending is identical to the FullSync function in that it writes the
 // full channel state to disk. Additionally, this function also creates a
 // LinkNode relationship between this newly created channel and an existing of
 // new LinkNode instance. Syncing with this method rather than FullSync is
@@ -319,15 +326,19 @@ func (c *OpenChannel) fullSync(tx *bolt.Tx) error {
 //
 // TODO(roasbeef): addr param should eventually be a lnwire.NetAddress type
 // that includes service bits.
-func (c *OpenChannel) FullSyncWithAddr(addr *net.TCPAddr) error {
+func (c *OpenChannel) SyncPending(addr *net.TCPAddr) error {
 	c.Lock()
 	defer c.Unlock()
+
+	fmt.Printf("SyncPending\n")
 
 	return c.Db.Update(func(tx *bolt.Tx) error {
 		// First, sync all the persistent channel state to disk.
 		if err := c.fullSync(tx); err != nil {
 			return err
 		}
+
+		fmt.Printf("SyncPending2\n")
 
 		nodeInfoBucket, err := tx.CreateBucketIfNotExists(nodeInfoBucket)
 		if err != nil {
@@ -714,6 +725,9 @@ func putOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 	if err := putChanAmountsTransferred(openChanBucket, channel); err != nil {
 		return err
 	}
+	if err := putChanIsPending(openChanBucket, channel); err != nil {
+		return err
+	}
 
 	// Next, write out the fields of the channel update less frequently.
 	if err := putChannelIDs(nodeChanBucket, channel); err != nil {
@@ -797,6 +811,9 @@ func fetchOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 	if err = fetchChanAmountsTransferred(openChanBucket, channel); err != nil {
 		return nil, err
 	}
+	if err = fetchChanIsPending(openChanBucket, channel); err != nil {
+		return nil, err
+	}
 
 	return channel, nil
 }
@@ -816,6 +833,9 @@ func deleteOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 		return err
 	}
 	if err := deleteChanAmountsTransferred(openChanBucket, channelID); err != nil {
+		return err
+	}
+	if err := deleteChanIsPending(openChanBucket, channelID); err != nil {
 		return err
 	}
 
@@ -1115,6 +1135,63 @@ func fetchChanAmountsTransferred(openChanBucket *bolt.Bucket, channel *OpenChann
 	return nil
 }
 
+func putChanIsPending(openChanBucket *bolt.Bucket, channel *OpenChannel) error {
+	scratch := make([]byte, 2)
+
+	var b bytes.Buffer
+	if err := writeOutpoint(&b, channel.ChanID); err != nil {
+		return err
+	}
+
+	keyPrefix := make([]byte, 3+b.Len())
+	copy(keyPrefix[3:], b.Bytes())
+	copy(keyPrefix[:3], isPendingPrefix)
+
+	if channel.IsPending == true {
+		byteOrder.PutUint16(scratch, uint16(1))
+		if err := openChanBucket.Put(keyPrefix, scratch); err != nil {
+			return err
+		}
+	} else {
+		byteOrder.PutUint16(scratch, uint16(0))
+		if err := openChanBucket.Put(keyPrefix, scratch); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func deleteChanIsPending(openChanBucket *bolt.Bucket, chanID []byte) error {
+	keyPrefix := make([]byte, 3+len(chanID))
+	copy(keyPrefix[3:], chanID)
+
+	copy(keyPrefix[:3], isPendingPrefix)
+	return openChanBucket.Delete(keyPrefix)
+}
+
+func fetchChanIsPending(openChanBucket *bolt.Bucket, channel *OpenChannel) error {
+	var b bytes.Buffer
+
+	if err := writeOutpoint(&b, channel.ChanID); err != nil {
+		return err
+	}
+
+	keyPrefix := make([]byte, 3+b.Len())
+	copy(keyPrefix[3:], b.Bytes())
+
+	copy(keyPrefix[:3], isPendingPrefix)
+
+	isPending := byteOrder.Uint16(openChanBucket.Get(keyPrefix))
+	if isPending == 1 {
+		channel.IsPending = true
+	} else {
+		channel.IsPending = false
+	}
+
+	return nil
+}
+
 func putChannelIDs(nodeChanBucket *bolt.Bucket, channel *OpenChannel) error {
 	// TODO(roasbeef): just pass in chanID everywhere for puts
 	var b bytes.Buffer
@@ -1334,6 +1411,12 @@ func putChanFundingInfo(nodeChanBucket *bolt.Bucket, channel *OpenChannel) error
 		return err
 	}
 
+	scratch2 := make([]byte, 2)
+	byteOrder.PutUint16(scratch2, uint16(channel.NumConfsRequired))
+	if _, err := b.Write(scratch2); err != nil {
+		return err
+	}
+
 	var boolByte [1]byte
 	if channel.IsInitiator {
 		boolByte[0] = 1
@@ -1404,6 +1487,12 @@ func fetchChanFundingInfo(nodeChanBucket *bolt.Bucket, channel *OpenChannel) err
 	}
 	unixSecs := byteOrder.Uint64(scratch)
 	channel.CreationTime = time.Unix(int64(unixSecs), 0)
+
+	scratch2 := make([]byte, 2)
+	if _, err := infoBytes.Read(scratch2); err != nil {
+		return err
+	}
+	channel.NumConfsRequired = byteOrder.Uint16(scratch2)
 
 	var boolByte [1]byte
 	if _, err := io.ReadFull(infoBytes, boolByte[:]); err != nil {

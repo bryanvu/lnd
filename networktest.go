@@ -227,13 +227,15 @@ func (l *lightningNode) start(lndError chan error) error {
 	}
 	copy(l.PubKey[:], pubkey)
 
+	fmt.Println("log dir: ", l.cfg.LogDir)
+
 	return nil
 }
 
 // cleanup cleans up all the temporary files created by the node's process.
 func (l *lightningNode) cleanup() error {
 	dirs := []string{
-		l.cfg.LogDir,
+		//l.cfg.LogDir,
 		l.cfg.DataDir,
 	}
 
@@ -727,6 +729,94 @@ func (n *networkHarness) WaitForChannelOpen(ctx context.Context,
 		return nil, err
 	case chanPoint := <-respChan:
 		return chanPoint, nil
+	}
+}
+
+// OpenChannel attempts to open a channel between srcNode and destNode with the
+// passed channel funding parameters. If the passed context has a timeout, then
+// if the timeout is reached before the channel pending notification is
+// received, an error is returned.
+func (n *networkHarness) OpenPendingChannel(ctx context.Context,
+	srcNode, destNode *lightningNode, amt btcutil.Amount,
+	pushAmt btcutil.Amount, numConfs uint32) (*lnrpc.PendingUpdate, error) {
+
+	openReq := &lnrpc.OpenChannelRequest{
+		NodePubkey:         destNode.PubKey[:],
+		LocalFundingAmount: int64(amt),
+		PushSat:            int64(pushAmt),
+		NumConfs:           numConfs,
+	}
+
+	respStream, err := srcNode.OpenChannel(ctx, openReq)
+	if err != nil {
+		return nil, fmt.Errorf("unable to open channel between "+
+			"alice and bob: %v", err)
+	}
+
+	chanPending := make(chan struct{})
+	errChan := make(chan error)
+	var pendingUpdate *lnrpc.PendingUpdate
+	go func() {
+		// Consume the "channel pending" update. This waits until the node
+		// notifies us that the final message in the channel funding workflow
+		// has been sent to the remote node.
+		resp, err := respStream.Recv()
+		if err != nil {
+			errChan <- err
+			return
+		}
+		pendingResp, ok := resp.Update.(*lnrpc.OpenStatusUpdate_ChanPending)
+		if !ok {
+			errChan <- fmt.Errorf("expected channel pending update, "+
+				"instead got %v", resp)
+			return
+		}
+
+		pendingUpdate = pendingResp.ChanPending
+		close(chanPending)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("timeout reached before chan pending " +
+			"update sent")
+	case err := <-errChan:
+		return nil, err
+	case <-chanPending:
+		return pendingUpdate, nil
+	}
+}
+
+// WaitForChannelPending
+func (n *networkHarness) WaitForChannelPending(ctx context.Context,
+	openChanStream lnrpc.Lightning_OpenChannelClient) ([]byte, error) {
+
+	errChan := make(chan error)
+	respChan := make(chan []byte)
+	go func() {
+		resp, err := openChanStream.Recv()
+		if err != nil {
+			errChan <- fmt.Errorf("unable to read rpc resp: %v", err)
+			return
+		}
+		fundingResp, ok := resp.Update.(*lnrpc.OpenStatusUpdate_ChanPending)
+		if !ok {
+			errChan <- fmt.Errorf("expected channel pending update, "+
+				"instead got %v", resp)
+			return
+		}
+
+		respChan <- fundingResp.ChanPending.Txid
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("timeout reached while waiting for " +
+			"channel pending")
+	case err := <-errChan:
+		return nil, err
+	case txid := <-respChan:
+		return txid, nil
 	}
 }
 

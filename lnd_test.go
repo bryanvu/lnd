@@ -197,6 +197,32 @@ func closeChannelAndAssert(t *harnessTest, net *networkHarness, ctx context.Cont
 	return closingTxid
 }
 
+func numChannelsPending(node *lightningNode, ctxt context.Context) (int, error) {
+	pendingChansRequest := &lnrpc.PendingChannelRequest{
+		Status: lnrpc.ChannelStatus_OPENING,
+	}
+	resp, err := node.PendingChannels(ctxt, pendingChansRequest)
+	if err != nil {
+		return 0, err
+	}
+	return len(resp.PendingChannels), nil
+}
+
+func assertNumChannelsPending(t *harnessTest, ctxt context.Context,
+	node *lightningNode, expected int) {
+
+	nodeNumChans, err := numChannelsPending(node, ctxt)
+	if err != nil {
+		t.Fatalf("error fetching node (%v) pending channels %v",
+			node.nodeId, err)
+	}
+
+	if nodeNumChans != expected {
+		t.Fatalf("number of pending channels incorrect. expected %v, got %v",
+			expected, nodeNumChans)
+	}
+}
+
 // testBasicChannelFunding performs a test exercising expected behavior from a
 // basic funding workflow. The test creates a new channel between Alice and
 // Bob, then immediately closes the channel after asserting some expected post
@@ -244,6 +270,69 @@ func testBasicChannelFunding(net *networkHarness, t *harnessTest) {
 	// relevant channel closing post conditions.
 	ctxt, _ = context.WithTimeout(ctxb, timeout)
 	closeChannelAndAssert(t, net, ctxt, net.Alice, chanPoint, false)
+}
+
+// testBasicChannelFunding performs a test exercising expected behavior from a
+// basic funding workflow. The test creates a new channel between Alice and
+// Bob, then immediately closes the channel after asserting some expected post
+// conditions. Finally, the chain itself is checked to ensure the closing
+// transaction was mined.
+func testChannelFundingPersistence(net *networkHarness, t *harnessTest) {
+	timeout := time.Duration(time.Second * 10)
+	ctxb := context.Background()
+	ctxt, _ := context.WithTimeout(ctxb, timeout)
+
+	chanAmt := btcutil.Amount(btcutil.SatoshiPerBitcoin / 2)
+	pushAmt := btcutil.Amount(0)
+
+	pendingUpdate, err := net.OpenPendingChannel(ctxt, net.Alice, net.Bob, chanAmt, pushAmt, 1)
+	if err != nil {
+		t.Fatalf("unable to open channel: %v", err)
+	}
+
+	// TODO(bvu): assertNumChannelsPending for Bob
+	assertNumChannelsPending(t, ctxt, net.Alice, 1)
+
+	if err := net.RestartNode(net.Alice, nil); err != nil {
+		t.Fatalf("Node restart failed: %v", err)
+	}
+
+	fundingTxID, err := chainhash.NewHash(pendingUpdate.Txid)
+	if err != nil {
+		t.Fatalf("unable to convert funding txid into chainhash.Hash: %v", err)
+	}
+
+	// Mine a block, then wait for Alice's node to notify us that the
+	// channel has been opened. The funding transaction should be found
+	// within the newly mined block.
+	block := mineBlocks(t, net, 1)[0]
+
+	assertNumChannelsPending(t, ctxt, net.Alice, 0)
+	assertTxInBlock(t, block, fundingTxID)
+
+	// The channel should be listed in the peer information returned by
+	// both peers.
+	outPoint := wire.OutPoint{
+		Hash:  *fundingTxID,
+		Index: pendingUpdate.OutputIndex,
+	}
+
+	if err := net.AssertChannelExists(ctxt, net.Alice, &outPoint); err != nil {
+		t.Fatalf("unable to assert channel existence: %v", err)
+	}
+
+	if err := net.AssertChannelExists(ctxt, net.Bob, &outPoint); err != nil {
+		t.Fatalf("unable to assert channel existence: %v", err)
+	}
+
+	// Finally, immediately close the channel. This function will also
+	// block until the channel is closed and will additionally assert the
+	// relevant channel closing post conditions.
+	chanPoint := &lnrpc.ChannelPoint{
+		FundingTxid: pendingUpdate.Txid,
+		OutputIndex: pendingUpdate.OutputIndex,
+	}
+	closeChannelAndAssert(t, net, ctxt, net.Alice, chanPoint, true)
 }
 
 // testChannelBalance creates a new channel between Alice and  Bob, then
@@ -1668,6 +1757,11 @@ var testsCases = []*testCase{
 		test: testBasicChannelFunding,
 	},
 	{
+		name: "funding flow persistence",
+		test: testChannelFundingPersistence,
+	},
+
+	{
 		name: "channel force closure",
 		test: testChannelForceClosure,
 	},
@@ -1678,10 +1772,6 @@ var testsCases = []*testCase{
 	{
 		name: "single hop invoice",
 		test: testSingleHopInvoice,
-	},
-	{
-		name: "list outgoing payments",
-		test: testListPayments,
 	},
 	{
 		name: "max pending channel",
@@ -1698,10 +1788,6 @@ var testsCases = []*testCase{
 	{
 		name: "invoice update subscription",
 		test: testInvoiceSubscriptions,
-	},
-	{
-		name: "multi-hop htlc error propagation",
-		test: testHtlcErrorPropagation,
 	},
 	{
 		// TODO(roasbeef): test always needs to be last as Bob's state
