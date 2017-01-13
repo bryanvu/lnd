@@ -1385,7 +1385,6 @@ func (m *PendingChannelResponse) GetPendingChannels() []*PendingChannelResponse_
 }
 
 type PendingChannelResponse_PendingChannel struct {
-	PeerId        int32         `protobuf:"varint,1,opt,name=peer_id" json:"peer_id,omitempty"`
 	IdentityKey   string        `protobuf:"bytes,2,opt,name=identity_key" json:"identity_key,omitempty"`
 	ChannelPoint  string        `protobuf:"bytes,3,opt,name=channel_point" json:"channel_point,omitempty"`
 	Capacity      int64         `protobuf:"varint,4,opt,name=capacity" json:"capacity,omitempty"`
@@ -1400,13 +1399,6 @@ func (m *PendingChannelResponse_PendingChannel) String() string { return proto.C
 func (*PendingChannelResponse_PendingChannel) ProtoMessage()    {}
 func (*PendingChannelResponse_PendingChannel) Descriptor() ([]byte, []int) {
 	return fileDescriptor0, []int{34, 0}
-}
-
-func (m *PendingChannelResponse_PendingChannel) GetPeerId() int32 {
-	if m != nil {
-		return m.PeerId
-	}
-	return 0
 }
 
 func (m *PendingChannelResponse_PendingChannel) GetIdentityKey() string {

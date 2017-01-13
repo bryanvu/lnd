@@ -713,7 +713,6 @@ func (r *rpcServer) PendingChannels(ctx context.Context,
 			// TODO(roasbeef): add confirmation progress
 			pub := pendingOpen.identityPub.SerializeCompressed()
 			pendingChan := &lnrpc.PendingChannelResponse_PendingChannel{
-				PeerId:        pendingOpen.peerId,
 				IdentityKey:   hex.EncodeToString(pub),
 				ChannelPoint:  pendingOpen.channelPoint.String(),
 				Capacity:      int64(pendingOpen.capacity),

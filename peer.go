@@ -380,25 +380,30 @@ out:
 		var isChanUpdate bool
 		var targetChan *wire.OutPoint
 
+		peerAddress := &lnwire.NetAddress{
+			Address:     p.addr.Address,
+			IdentityKey: p.addr.IdentityKey,
+		}
+
 		switch msg := nextMsg.(type) {
 		case *lnwire.Ping:
 			p.queueMsg(lnwire.NewPong(msg.Nonce), nil)
 
 		case *lnwire.SingleFundingRequest:
-			p.server.fundingMgr.processFundingRequest(msg, p)
+			p.server.fundingMgr.processFundingRequest(msg, peerAddress)
 		case *lnwire.SingleFundingResponse:
-			p.server.fundingMgr.processFundingResponse(msg, p)
+			p.server.fundingMgr.processFundingResponse(msg, peerAddress)
 		case *lnwire.SingleFundingComplete:
-			p.server.fundingMgr.processFundingComplete(msg, p)
+			p.server.fundingMgr.processFundingComplete(msg, peerAddress)
 		case *lnwire.SingleFundingSignComplete:
-			p.server.fundingMgr.processFundingSignComplete(msg, p)
+			p.server.fundingMgr.processFundingSignComplete(msg, peerAddress)
 		case *lnwire.SingleFundingOpenProof:
-			p.server.fundingMgr.processFundingOpenProof(msg, p)
+			p.server.fundingMgr.processFundingOpenProof(msg, peerAddress)
 		case *lnwire.CloseRequest:
 			p.remoteCloseChanReqs <- msg
 
 		case *lnwire.ErrorGeneric:
-			p.server.fundingMgr.processErrorGeneric(msg, p)
+			p.server.fundingMgr.processErrorGeneric(msg, peerAddress)
 
 		// TODO(roasbeef): create ChanUpdater interface for the below
 		case *lnwire.HTLCAddRequest:

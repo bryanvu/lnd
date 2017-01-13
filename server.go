@@ -80,6 +80,10 @@ type server struct {
 	quit chan struct{}
 }
 
+type SendMessages func(target *btcec.PublicKey, msg ...lnwire.Message) error
+
+type FindPeer func(peerKey *btcec.PublicKey) *peer
+
 // newServer creates a new instance of the server which is to listen using the
 // passed listener address.
 func newServer(listenAddrs []string, notifier chainntnfs.ChainNotifier,
@@ -174,7 +178,8 @@ func newServer(listenAddrs []string, notifier chainntnfs.ChainNotifier,
 
 	s.rpcServer = newRpcServer(s)
 	s.breachArbiter = newBreachArbiter(wallet, chanDB, notifier, s.htlcSwitch)
-	s.fundingMgr = newFundingManager(wallet, s.breachArbiter)
+	s.fundingMgr = newFundingManager(wallet, s.breachArbiter, s.sendToPeer,
+		s.findPeer)
 
 	// TODO(roasbeef): introduce closure and config system to decouple the
 	// initialization above ^
@@ -375,6 +380,15 @@ func (s *server) sendToPeer(target *btcec.PublicKey, msgs ...lnwire.Message) err
 	}
 
 	return nil
+}
+
+// findPeer will return the peer that corresponds to the passed in public key.
+// This function is used by the funding manager, allowing it to update the
+// daemon's local representation of the remote peer.
+func (s *server) findPeer(peerKey *btcec.PublicKey) *peer {
+	serializedIdKey := string(peerKey.SerializeCompressed())
+
+	return s.peersByPub[serializedIdKey]
 }
 
 // peerConnected is a function that handles initialization a newly connected
@@ -748,7 +762,11 @@ func (s *server) handleOpenChanReq(req *openChanReq) {
 	// of blocking on this request which is exported as a synchronous
 	// request to the outside world.
 	// TODO(roasbeef): server semaphore to restrict num goroutines
-	go s.fundingMgr.initFundingWorkflow(targetPeer, req)
+	peerAddress := &lnwire.NetAddress{
+		Address:     targetPeer.addr.Address,
+		IdentityKey: req.targetPubkey,
+	}
+	go s.fundingMgr.initFundingWorkflow(peerAddress, req)
 }
 
 // ConnectToPeer requests that the server connect to a Lightning Network peer
