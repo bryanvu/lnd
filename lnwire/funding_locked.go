@@ -38,7 +38,7 @@ var _ Message = (*FundingLocked)(nil)
 //
 // This is part of the lnwire.Message interface.
 func (c *FundingLocked) Decode(r io.Reader, pver uint32) error {
-	// ChannelID (8)
+	// ChannelID (36)
 	// AnnouncementNodeSignature (64)
 	// AnnouncementBitcoinSignature (64)
 	// NextPerCommitmentPoint (33)
@@ -60,7 +60,7 @@ func (c *FundingLocked) Decode(r io.Reader, pver uint32) error {
 //
 // This is part of the lnwire.Message interface.
 func (c *FundingLocked) Encode(w io.Writer, pver uint32) error {
-	// ChannelID (8)
+	// ChannelOutpoint (36)
 	// AnnouncementNodeSignature (64)
 	// AnnouncementBitcoinSignature (64)
 	// NextPerCommitmentPoint (33)
@@ -90,7 +90,7 @@ func (c *FundingLocked) Command() uint32 {
 //
 // This is part of the lnwire.Message interface.
 func (c *FundingLocked) MaxPayloadLength(uint32) uint32 {
-	return 169
+	return 197
 }
 
 // Validate examines each populated field within the FundingLocked message for

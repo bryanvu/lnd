@@ -16,6 +16,12 @@ func TestFundingLockedWire(t *testing.T) {
 		t.Fatalf("unable to encode FundingLocked: %v", err)
 	}
 
+	// Check to ensure that the FundingLocked message is the correct size.
+	if uint32(b.Len()) > fl.MaxPayloadLength(0) {
+		t.Fatalf("length of FundingLocked message is too long: %v should be less than %v",
+			b.Len(), fl.MaxPayloadLength(0))
+	}
+
 	// Deserialize the encoded FundingLocked message into an empty struct.
 	fl2 := &FundingLocked{}
 	if err := fl2.Decode(&b, 0); err != nil {

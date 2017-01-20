@@ -201,15 +201,15 @@ func (f *fundingManager) Start() error {
 
 	fndgLog.Tracef("Funding manager running")
 
-	//TODO(bvu): on restart, the funding manager should check the wallet.channelDB
-	//for pending channels then call waitForFundingConfirmation on those
-
+	//TODO(bvu): add comment
 	pendingChannels, err := f.wallet.ChannelDB.FetchPendingChannels()
 	if err != nil {
 		return err
 	}
 
 	for _, channel := range pendingChannels {
+		fndgLog.Debugf("starting channel: %v", channel)
+
 		// TODO(bvu): add comment
 		f.barrierMtx.Lock()
 		fndgLog.Tracef("Creating chan barrier for "+
@@ -217,7 +217,9 @@ func (f *fundingManager) Start() error {
 		f.newChanBarriers[*channel.FundingOutpoint] = make(chan struct{})
 		f.barrierMtx.Unlock()
 
-		go f.waitForFundingConfirmation(channel)
+		updates := make(chan *lnrpc.OpenStatusUpdate)
+
+		go f.waitForFundingConfirmation(channel, updates)
 	}
 
 	f.wg.Add(1) // TODO(roasbeef): tune
@@ -311,6 +313,7 @@ func (f *fundingManager) reservationCoordinator() {
 				f.handlePendingChannels(msg)
 			}
 		case <-f.quit:
+			fndgLog.Debugf("quitting reservationCoordinator")
 			return
 		}
 	}
@@ -653,12 +656,13 @@ func (f *fundingManager) handleFundingComplete(fmsg *fundingCompleteMsg) {
 		},
 	}
 
-	go f.waitForFundingConfirmation(completeChan)
+	go f.waitForFundingConfirmation(completeChan, resCtx.updates)
 
 	f.deleteReservationCtx(peerKey, fmsg.msg.ChannelID)
 }
 
-func (f *fundingManager) waitForFundingConfirmation(completeChan *channeldb.OpenChannel) {
+func (f *fundingManager) waitForFundingConfirmation(completeChan *channeldb.OpenChannel,
+	updates chan *lnrpc.OpenStatusUpdate) {
 	// Register with the ChainNotifier for a notification once the funding
 	// transaction reaches `numConfs` confirmations.
 	txid := completeChan.FundingOutpoint.Hash
@@ -706,6 +710,7 @@ out:
 	// First we send the newly opened channel to the source server
 	// TODO(bvu): add an error
 	peer := f.findPeer(completeChan.IdentityPub)
+	fndgLog.Debugf("peer %v with ID(%v) found", peer, completeChan.IdentityPub)
 	if peer == nil {
 		fndgLog.Errorf("unable to find peer with public key: %v", completeChan.IdentityPub)
 	} else {
@@ -752,16 +757,16 @@ out:
 	// Finally give the caller a final update notifying them that
 	// the channel is now open.
 	// TODO(roasbeef): helper funcs for proto construction
-	// resCtx.updates <- &lnrpc.OpenStatusUpdate{
-	// 	Update: &lnrpc.OpenStatusUpdate_ChanOpen{
-	// 		ChanOpen: &lnrpc.ChannelOpenUpdate{
-	// 			ChannelPoint: &lnrpc.ChannelPoint{
-	// 				FundingTxid: fundingPoint.Hash[:],
-	// 				OutputIndex: fundingPoint.Index,
-	// 			},
-	// 		},
-	// 	},
-	// }
+	updates <- &lnrpc.OpenStatusUpdate{
+		Update: &lnrpc.OpenStatusUpdate_ChanOpen{
+			ChanOpen: &lnrpc.ChannelOpenUpdate{
+				ChannelPoint: &lnrpc.ChannelPoint{
+					FundingTxid: fundingPoint.Hash[:],
+					OutputIndex: fundingPoint.Index,
+				},
+			},
+		},
+	}
 	return
 }
 
@@ -936,7 +941,7 @@ func (f *fundingManager) handleFundingSignComplete(fmsg *fundingSignCompleteMsg)
 	// once it reaches a sufficient number of confirmations.
 	// TODO(roasbeef): semaphore to limit active chan open goroutines
 	// TODO(bvu): update comment
-	go f.waitForFundingConfirmation(completeChan)
+	go f.waitForFundingConfirmation(completeChan, resCtx.updates)
 
 	f.deleteReservationCtx(peerKey, fmsg.msg.ChannelID)
 }
