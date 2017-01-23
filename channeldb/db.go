@@ -339,6 +339,86 @@ func (d *DB) FetchAllChannels() ([]*OpenChannel, error) {
 	return channels, err
 }
 
+// FetchPendingChannels will return channels that have completed the process
+// of generating and broadcasting funding transactions, but whose funding
+// transactions have yet to be confirmed on the blockchain. Upon restart, the
+// funding manager will use this list to reinitialize the systems that will
+// complete the funding process.
+func (d *DB) FetchPendingChannels() ([]*OpenChannel, error) {
+	var channels []*OpenChannel
+
+	err := d.View(func(tx *bolt.Tx) error {
+		// Get the bucket dedicated to storing the meta-data for open
+		// channels.
+		openChanBucket := tx.Bucket(openChannelBucket)
+		if openChanBucket == nil {
+			return ErrNoActiveChannels
+		}
+
+		// Next, fetch the bucket dedicated to storing meta-data
+		// related to all nodes. All keys within this bucket are the
+		// serialized public keys of all our direct counterparties.
+		nodeMetaBucket := tx.Bucket(nodeInfoBucket)
+		if nodeMetaBucket == nil {
+			return fmt.Errorf("node bucket not created")
+		}
+
+		// Finally for each node public key in the bucket, fetch all
+		// the channels related to this particualr ndoe.
+		return nodeMetaBucket.ForEach(func(k, v []byte) error {
+			nodeChanBucket := openChanBucket.Bucket(k)
+			if nodeChanBucket == nil {
+				return nil
+			}
+			nodeChannels, err := d.fetchNodeChannels(openChanBucket,
+				nodeChanBucket)
+			if err != nil {
+				return err
+			}
+			for _, channel := range nodeChannels {
+				if channel.IsPending == true {
+					channels = append(channels, nodeChannels...)
+				}
+			}
+			return nil
+		})
+	})
+
+	return channels, err
+}
+
+// MarkChannelAsOpen records the finalization of the funding process and marks
+// a channel as available for use.
+func (d *DB) MarkChannelAsOpen(outpoint *wire.OutPoint) error {
+	err := d.Update(func(tx *bolt.Tx) error {
+		openChanBucket := tx.Bucket(openChannelBucket)
+		if openChanBucket == nil {
+			return ErrNoActiveChannels
+		}
+
+		// generate the database key, which will consist of the IsPending
+		// prefix followed by the channel's outpoint.
+		var b bytes.Buffer
+		if err := writeOutpoint(&b, outpoint); err != nil {
+			return err
+		}
+		keyPrefix := make([]byte, 3+b.Len())
+		copy(keyPrefix[3:], b.Bytes())
+		copy(keyPrefix[:3], isPendingPrefix)
+
+		// for the database value, store a zero, since the channel is no
+		// longer pending.
+		scratch := make([]byte, 2)
+		byteOrder.PutUint16(scratch, uint16(0))
+		return openChanBucket.Put(keyPrefix, scratch)
+	})
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // syncVersions function is used for safe db version synchronization. It applies
 // migration functions to the current database and recovers the previous
 // state of db if at least one error/panic appeared during migration.

@@ -309,6 +309,15 @@ func (f *fundingManager) handleNumPending(msg *numPendingReq) {
 	for _, peerChannels := range f.activeReservations {
 		numPending += uint32(len(peerChannels))
 	}
+
+	dbPendingChannels, err := f.wallet.ChannelDB.FetchPendingChannels()
+	if err != nil {
+		fndgLog.Errorf("unable to fetch pending channels from database: %v", err)
+		return
+	}
+
+	numPending = numPending + uint32(len(dbPendingChannels))
+
 	msg.resp <- numPending
 }
 
@@ -333,6 +342,25 @@ func (f *fundingManager) handlePendingChannels(msg *pendingChansReq) {
 			pendingChannels = append(pendingChannels, pendingChan)
 		}
 	}
+
+	dbPendingChannels, err := f.wallet.ChannelDB.FetchPendingChannels()
+	if err != nil {
+		fndgLog.Errorf("unable to fetch pending channels from database: %v", err)
+		return
+	}
+
+	for _, dbPendingChan := range dbPendingChannels {
+		pendingChan := &pendingChannel{
+			identityPub:   dbPendingChan.IdentityPub,
+			channelPoint:  dbPendingChan.ChanID,
+			capacity:      dbPendingChan.Capacity,
+			localBalance:  dbPendingChan.OurBalance,
+			remoteBalance: dbPendingChan.TheirBalance,
+		}
+
+		pendingChannels = append(pendingChannels, pendingChan)
+	}
+
 	msg.resp <- pendingChannels
 }
 

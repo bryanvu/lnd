@@ -68,6 +68,7 @@ var (
 	satSentPrefix        = []byte("ssp")
 	satReceivedPrefix    = []byte("srp")
 	netFeesPrefix        = []byte("ntp")
+	isPendingPrefix      = []byte("pdg")
 
 	// chanIDKey stores the node, and channelID for an active channel.
 	chanIDKey = []byte("cik")
@@ -195,6 +196,11 @@ type OpenChannel struct {
 	// negotiate fees, or close the channel.
 	IsInitiator bool
 
+	// IsPending indicates whether a channel's funding transaction has been
+	// confirmed. When the confirmation is received, the Funding Manager
+	// will set the value of IsPending to false.
+	IsPending bool
+
 	// FundingOutpoint is the outpoint of the final funding transaction.
 	FundingOutpoint *wire.OutPoint
 
@@ -310,7 +316,7 @@ func (c *OpenChannel) fullSync(tx *bolt.Tx) error {
 	return putOpenChannel(chanBucket, nodeChanBucket, c)
 }
 
-// FullSyncWithAddr is identical to the FullSync function in that it writes the
+// SyncPending is identical to the FullSync function in that it writes the
 // full channel state to disk. Additionally, this function also creates a
 // LinkNode relationship between this newly created channel and an existing of
 // new LinkNode instance. Syncing with this method rather than FullSync is
@@ -319,7 +325,7 @@ func (c *OpenChannel) fullSync(tx *bolt.Tx) error {
 //
 // TODO(roasbeef): addr param should eventually be a lnwire.NetAddress type
 // that includes service bits.
-func (c *OpenChannel) FullSyncWithAddr(addr *net.TCPAddr) error {
+func (c *OpenChannel) SyncPending(addr *net.TCPAddr) error {
 	c.Lock()
 	defer c.Unlock()
 
@@ -723,6 +729,9 @@ func putOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 	if err := putChanAmountsTransferred(openChanBucket, channel); err != nil {
 		return err
 	}
+	if err := putChanIsPending(openChanBucket, channel); err != nil {
+		return err
+	}
 
 	// Next, write out the fields of the channel update less frequently.
 	if err := putChannelIDs(nodeChanBucket, channel); err != nil {
@@ -807,6 +816,9 @@ func fetchOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 	if err = fetchChanAmountsTransferred(openChanBucket, channel); err != nil {
 		return nil, fmt.Errorf("unable to read sat transferred: %v", err)
 	}
+	if err = fetchChanIsPending(openChanBucket, channel); err != nil {
+		return nil, err
+	}
 
 	return channel, nil
 }
@@ -832,6 +844,9 @@ func deleteOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 		return err
 	}
 	if err := deleteChanOurDustLimit(openChanBucket, channelID); err != nil {
+		return err
+	}
+	if err := deleteChanIsPending(openChanBucket, channelID); err != nil {
 		return err
 	}
 
@@ -1146,6 +1161,63 @@ func fetchChanAmountsTransferred(openChanBucket *bolt.Bucket, channel *OpenChann
 	copy(keyPrefix[:3], satReceivedPrefix)
 	totalReceivedBytes := openChanBucket.Get(keyPrefix)
 	channel.TotalSatoshisReceived = byteOrder.Uint64(totalReceivedBytes)
+
+	return nil
+}
+
+func putChanIsPending(openChanBucket *bolt.Bucket, channel *OpenChannel) error {
+	scratch := make([]byte, 2)
+
+	var b bytes.Buffer
+	if err := writeOutpoint(&b, channel.ChanID); err != nil {
+		return err
+	}
+
+	keyPrefix := make([]byte, 3+b.Len())
+	copy(keyPrefix[3:], b.Bytes())
+	copy(keyPrefix[:3], isPendingPrefix)
+
+	if channel.IsPending == true {
+		byteOrder.PutUint16(scratch, uint16(1))
+		if err := openChanBucket.Put(keyPrefix, scratch); err != nil {
+			return err
+		}
+	} else {
+		byteOrder.PutUint16(scratch, uint16(0))
+		if err := openChanBucket.Put(keyPrefix, scratch); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func deleteChanIsPending(openChanBucket *bolt.Bucket, chanID []byte) error {
+	keyPrefix := make([]byte, 3+len(chanID))
+	copy(keyPrefix[3:], chanID)
+
+	copy(keyPrefix[:3], isPendingPrefix)
+	return openChanBucket.Delete(keyPrefix)
+}
+
+func fetchChanIsPending(openChanBucket *bolt.Bucket, channel *OpenChannel) error {
+	var b bytes.Buffer
+
+	if err := writeOutpoint(&b, channel.ChanID); err != nil {
+		return err
+	}
+
+	keyPrefix := make([]byte, 3+b.Len())
+	copy(keyPrefix[3:], b.Bytes())
+
+	copy(keyPrefix[:3], isPendingPrefix)
+
+	isPending := byteOrder.Uint16(openChanBucket.Get(keyPrefix))
+	if isPending == 1 {
+		channel.IsPending = true
+	} else {
+		channel.IsPending = false
+	}
 
 	return nil
 }
