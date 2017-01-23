@@ -99,6 +99,11 @@ type fundingErrorMsg struct {
 	peerAddress *lnwire.NetAddress
 }
 
+type newChannelReq struct {
+	channel *lnwallet.LightningChannel
+	done    chan struct{}
+}
+
 // pendingChannels is a map instantiated per-peer which tracks all active
 // pending single funded channels indexed by their pending channel identifier.
 type pendingChannels map[uint64]*reservationWithCtx
@@ -160,6 +165,13 @@ type fundingManager struct {
 	// requests from a local subsystem within the daemon.
 	fundingRequests chan *initFundingMsg
 
+	// newChanBarriers is a map from a channel point to a 'barrier' which
+	// will be signalled once the channel is fully open. This barrier acts
+	// as a synchronization point for any incoming/outgoing HTLCs before
+	// the channel has been fully opened.
+	barrierMtx      sync.RWMutex
+	newChanBarriers map[wire.OutPoint]chan struct{}
+
 	fakeProof *channelProof
 
 	quit chan struct{}
@@ -189,6 +201,7 @@ func newFundingManager(cfg *FundingConfig) (*fundingManager, error) {
 		},
 
 		activeReservations: make(map[serializedPubKey]pendingChannels),
+		newChanBarriers:    make(map[wire.OutPoint]chan struct{}),
 		fundingMsgs:        make(chan interface{}, msgBufferSize),
 		fundingRequests:    make(chan *initFundingMsg, msgBufferSize),
 		queries:            make(chan interface{}, 1),
@@ -568,14 +581,16 @@ func (f *fundingManager) handleFundingResponse(fmsg *fundingResponseMsg) {
 		return
 	}
 
-	// Register a new barrier for this channel to properly synchronize with
-	// the peer's readHandler once the channel is open.
-	peer, err := f.findPeer(peerKey)
-	if err != nil {
-		fndgLog.Errorf("Error finding peer: %v", err)
-		return
-	}
-	peer.barrierInits <- *outPoint
+	// A new channel has almost finished the funding
+	// process. In order to properly synchronize with the
+	// writeHandler goroutine, we add a new channel to the
+	// barriers map which will be closed once the channel
+	// is fully open.
+	f.barrierMtx.Lock()
+	fndgLog.Tracef("Creating chan barrier for "+
+		"ChannelPoint(%v)", outPoint)
+	f.newChanBarriers[*outPoint] = make(chan struct{})
+	f.barrierMtx.Unlock()
 
 	fndgLog.Infof("Generated ChannelPoint(%v) for pendingID(%v)", outPoint,
 		chanID)
@@ -651,14 +666,16 @@ func (f *fundingManager) handleFundingComplete(fmsg *fundingCompleteMsg) {
 		return
 	}
 
-	// Register a new barrier for this channel to properly synchronize with
-	// the peer's readHandler once the channel is open.
-	peer, err := f.findPeer(peerKey)
-	if err != nil {
-		fndgLog.Errorf("Error finding peer: %v", err)
-		return
-	}
-	peer.barrierInits <- *fundingOut
+	// A new channel has almost finished the funding
+	// process. In order to properly synchronize with the
+	// writeHandler goroutine, we add a new channel to the
+	// barriers map which will be closed once the channel
+	// is fully open.
+	f.barrierMtx.Lock()
+	fndgLog.Tracef("Creating chan barrier for "+
+		"ChannelPoint(%v)", fundingOut)
+	f.newChanBarriers[*fundingOut] = make(chan struct{})
+	f.barrierMtx.Unlock()
 
 	fndgLog.Infof("sending signComplete for pendingID(%v) over ChannelPoint(%v)",
 		chanID, fundingOut)
@@ -848,7 +865,23 @@ func (f *fundingManager) handleFundingSignComplete(fmsg *fundingSignCompleteMsg)
 			fndgLog.Errorf("Error finding peer: %v", err)
 			return
 		}
-		peer.newChannels <- openChanDetails.Channel
+		newChanDone := make(chan struct{})
+		newChanReq := &newChannelReq{
+			channel: openChanDetails.Channel,
+			done:    newChanDone,
+		}
+		peer.newChannels <- newChanReq
+
+		<-newChanDone
+
+		// Close the active channel barrier signalling the
+		// readHandler that commitment related modifications to
+		// this channel can now proceed.
+		f.barrierMtx.Lock()
+		fndgLog.Tracef("Closing chan barrier for ChannelPoint(%v)", fundingPoint)
+		close(f.newChanBarriers[*fundingPoint])
+		delete(f.newChanBarriers, *fundingPoint)
+		f.barrierMtx.Unlock()
 
 		// Afterwards we send the breach arbiter the new channel so it
 		// can watch for attempts to breach the channel's contract by
@@ -979,8 +1012,25 @@ func (f *fundingManager) handleFundingOpen(fmsg *fundingOpenMsg) {
 	// counterparty for attempting to cheat us.
 	f.arbiterChan <- openChan
 
-	// Finally, notify the target peer of the newly open channel.
-	peer.newChannels <- openChan
+	// Finally, notify the target peer of the newly opened channel.
+	newChanDone := make(chan struct{})
+	newChanReq := &newChannelReq{
+		channel: openChan,
+		done:    newChanDone,
+	}
+	peer.newChannels <- newChanReq
+
+	<-newChanDone
+
+	// Close the active channel barrier signalling the
+	// readHandler that commitment related modifications to
+	// this channel can now proceed.
+	fundingPoint := resCtx.reservation.FundingOutpoint()
+	f.barrierMtx.Lock()
+	fndgLog.Tracef("Closing chan barrier for ChannelPoint(%v)", fundingPoint)
+	close(f.newChanBarriers[*fundingPoint])
+	delete(f.newChanBarriers, *fundingPoint)
+	f.barrierMtx.Unlock()
 }
 
 // initFundingWorkflow sends a message to the funding manager instructing it
@@ -1081,6 +1131,23 @@ func (f *fundingManager) handleInitFundingMsg(msg *initFundingMsg) {
 		fndgLog.Errorf("Unable to send funding request message: %v", err)
 		msg.err <- err
 		return
+	}
+}
+
+func (f *fundingManager) holdUntilChannelOpen(targetChan wire.OutPoint) {
+	f.barrierMtx.RLock()
+	barrier, ok := f.newChanBarriers[targetChan]
+	f.barrierMtx.RUnlock()
+	if ok {
+		fndgLog.Tracef("waiting for chan barrier "+
+			"signal for ChannelPoint(%v)", targetChan)
+		select {
+		case <-barrier:
+		case <-f.quit: // TODO(roasbeef): add timer?
+			break
+		}
+		fndgLog.Tracef("barrier for ChannelPoint(%v) "+
+			"closed", targetChan)
 	}
 }
 
