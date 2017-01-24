@@ -214,6 +214,11 @@ type OpenChannel struct {
 	// funding transaction.
 	FundingWitnessScript []byte
 
+	// NumConfsRequired is the number of confirmations a channel's funding
+	// transaction must have received in order to be considered available for
+	// normal transactional use.
+	NumConfsRequired uint16
+
 	// LocalCsvDelay is the delay to be used in outputs paying to us within
 	// the commitment transaction. This value is to be always expressed in
 	// terms of relative blocks.
@@ -1442,6 +1447,11 @@ func putChanFundingInfo(nodeChanBucket *bolt.Bucket, channel *OpenChannel) error
 		return err
 	}
 
+	byteOrder.PutUint16(scratch[:2], uint16(channel.NumConfsRequired))
+	if _, err := b.Write(scratch[:2]); err != nil {
+		return err
+	}
+
 	var boolByte [1]byte
 	if channel.IsInitiator {
 		boolByte[0] = 1
@@ -1512,6 +1522,11 @@ func fetchChanFundingInfo(nodeChanBucket *bolt.Bucket, channel *OpenChannel) err
 	}
 	unixSecs := byteOrder.Uint64(scratch)
 	channel.CreationTime = time.Unix(int64(unixSecs), 0)
+
+	if _, err := infoBytes.Read(scratch[:2]); err != nil {
+		return err
+	}
+	channel.NumConfsRequired = byteOrder.Uint16(scratch[:2])
 
 	var boolByte [1]byte
 	if _, err := io.ReadFull(infoBytes, boolByte[:]); err != nil {
