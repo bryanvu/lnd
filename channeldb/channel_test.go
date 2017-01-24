@@ -159,6 +159,7 @@ func createTestChannelState(cdb *DB) (*OpenChannel, error) {
 		OurMultiSigKey:             privKey.PubKey(),
 		TheirMultiSigKey:           privKey.PubKey(),
 		FundingWitnessScript:       script,
+		NumConfsRequired:           4,
 		TheirCurrentRevocation:     privKey.PubKey(),
 		TheirCurrentRevocationHash: key,
 		OurDeliveryScript:          script,
@@ -307,6 +308,10 @@ func TestOpenChannelPutGetDelete(t *testing.T) {
 	}
 	if state.TotalSatoshisReceived != newState.TotalSatoshisReceived {
 		t.Fatalf("satoshis received doesn't match")
+	}
+	if state.NumConfsRequired != newState.NumConfsRequired {
+		t.Fatalf("num confs required doesn't match: %v, vs. %v",
+			state.NumConfsRequired, newState.NumConfsRequired)
 	}
 
 	if state.CreationTime.Unix() != newState.CreationTime.Unix() {
