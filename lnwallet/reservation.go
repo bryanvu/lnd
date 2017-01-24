@@ -303,19 +303,21 @@ func (r *ChannelReservation) OurSignatures() ([]*InputScript, []byte) {
 // of confirmations. Once the method unblocks, a LightningChannel instance is
 // returned, marking the channel available for updates.
 func (r *ChannelReservation) CompleteReservation(fundingInputScripts []*InputScript,
-	commitmentSig []byte) error {
+	commitmentSig []byte) (*channeldb.OpenChannel, error) {
 
 	// TODO(roasbeef): add flag for watch or not?
 	errChan := make(chan error, 1)
+	completeChan := make(chan *channeldb.OpenChannel, 1)
 
 	r.wallet.msgChan <- &addCounterPartySigsMsg{
 		pendingFundingID:         r.reservationID,
 		theirFundingInputScripts: fundingInputScripts,
 		theirCommitmentSig:       commitmentSig,
+		completeChan:             completeChan,
 		err:                      errChan,
 	}
 
-	return <-errChan
+	return <-completeChan, <-errChan
 }
 
 // CompleteReservationSingle finalizes the pending single funder channel
@@ -329,9 +331,10 @@ func (r *ChannelReservation) CompleteReservation(fundingInputScripts []*InputScr
 // populated.
 func (r *ChannelReservation) CompleteReservationSingle(
 	revocationKey *btcec.PublicKey, fundingPoint *wire.OutPoint,
-	commitSig []byte, obsfucator [StateHintSize]byte) error {
+	commitSig []byte, obsfucator [StateHintSize]byte) (*channeldb.OpenChannel, error) {
 
 	errChan := make(chan error, 1)
+	completeChan := make(chan *channeldb.OpenChannel, 1)
 
 	r.wallet.msgChan <- &addSingleFunderSigsMsg{
 		pendingFundingID:   r.reservationID,
@@ -339,10 +342,11 @@ func (r *ChannelReservation) CompleteReservationSingle(
 		fundingOutpoint:    fundingPoint,
 		theirCommitmentSig: commitSig,
 		obsfucator:         obsfucator,
+		completeChan:       completeChan,
 		err:                errChan,
 	}
 
-	return <-errChan
+	return <-completeChan, <-errChan
 }
 
 // OurSignatures returns the counterparty's signatures to all inputs to the
@@ -472,25 +476,4 @@ func (r *ChannelReservation) DispatchChan() (*OpenChannelDetails, error) {
 		ConfirmationHeight: openDetails.blockHeight,
 		TransactionIndex:   openDetails.txIndex,
 	}, nil
-}
-
-// FinalizeReservation completes the pending reservation, returning an active
-// open LightningChannel. This method should be called after the responder to
-// the single funder workflow receives and verifies a proof from the initiator
-// of an open channel.
-//
-// NOTE: This method should *only* be called as the last step when one is the
-// responder to an initiated single funder workflow.
-func (r *ChannelReservation) FinalizeReservation() (*LightningChannel, error) {
-	errChan := make(chan error, 1)
-	r.wallet.msgChan <- &channelOpenMsg{
-		pendingFundingID: r.reservationID,
-		err:              errChan,
-	}
-
-	if err := <-errChan; err != nil {
-		return nil, err
-	}
-
-	return (<-r.chanOpen).channel, nil
 }

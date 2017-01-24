@@ -396,8 +396,6 @@ out:
 			p.server.fundingMgr.processFundingComplete(msg, p.addr)
 		case *lnwire.SingleFundingSignComplete:
 			p.server.fundingMgr.processFundingSignComplete(msg, p.addr)
-		case *lnwire.SingleFundingOpenProof:
-			p.server.fundingMgr.processFundingOpenProof(msg, p.addr)
 		case *lnwire.CloseRequest:
 			p.remoteCloseChanReqs <- msg
 

@@ -185,9 +185,9 @@ func newServer(listenAddrs []string, notifier chainntnfs.ChainNotifier,
 
 	s.rpcServer = newRpcServer(s)
 	s.breachArbiter = newBreachArbiter(wallet, chanDB, notifier, s.htlcSwitch)
-
 	fundingMgr, err := newFundingManager(&FundingConfig{
 		Wallet:      wallet,
+		Notifier:    s.chainNotifier,
 		ArbiterChan: s.breachArbiter.newContracts,
 		SendToPeer:  s.sendToPeer,
 		FindPeer:    s.findPeer,
@@ -195,7 +195,6 @@ func newServer(listenAddrs []string, notifier chainntnfs.ChainNotifier,
 	if err != nil {
 		return nil, err
 	}
-
 	s.fundingMgr = fundingMgr
 
 	// TODO(roasbeef): introduce closure and config system to decouple the
