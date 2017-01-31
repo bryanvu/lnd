@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -470,7 +469,7 @@ func testDualFundingReservationWorkflow(miner *rpctest.Harness, wallet *lnwallet
 	if err != nil {
 		t.Fatalf("bob is unable to sign alice's commit tx: %v", err)
 	}
-	if err := chanReservation.CompleteReservation(bobsSigs, commitSig); err != nil {
+	if _, err := chanReservation.CompleteReservation(bobsSigs, commitSig); err != nil {
 		t.Fatalf("unable to complete funding tx: %v", err)
 	}
 
@@ -746,7 +745,7 @@ func testSingleFunderReservationWorkflowInitiator(miner *rpctest.Harness,
 	if err != nil {
 		t.Fatalf("bob is unable to sign alice's commit tx: %v", err)
 	}
-	if err := chanReservation.CompleteReservation(nil, bobCommitSig); err != nil {
+	if _, err := chanReservation.CompleteReservation(nil, bobCommitSig); err != nil {
 		t.Fatalf("unable to complete funding tx: %v", err)
 	}
 
@@ -925,7 +924,7 @@ func testSingleFunderReservationWorkflowResponder(miner *rpctest.Harness,
 
 	// With this stage complete, Alice can now complete the reservation.
 	bobRevokeKey := bobContribution.RevocationKey
-	err = chanReservation.CompleteReservationSingle(bobRevokeKey,
+	_, err = chanReservation.CompleteReservationSingle(bobRevokeKey,
 		fundingOutpoint, bobCommitSig, bobObsfucator)
 	if err != nil {
 		t.Fatalf("unable to complete reservation: %v", err)
@@ -935,14 +934,6 @@ func testSingleFunderReservationWorkflowResponder(miner *rpctest.Harness,
 	if chanReservation.FundingOutpoint() != fundingOutpoint {
 		t.Fatalf("funding outputs don't match: %#v vs %#v",
 			chanReservation.FundingOutpoint(), fundingOutpoint)
-	}
-
-	// Some period of time later, Bob presents us with an SPV proof
-	// attesting to an open channel. At this point Alice recognizes the
-	// channel, saves the state to disk, and creates the channel itself.
-	_, err = chanReservation.FinalizeReservation()
-	if err != nil && !strings.Contains(err.Error(), "No information") {
-		t.Fatalf("unable to finalize reservation: %v", err)
 	}
 
 	// TODO(roasbeef): bob verify alice's sig
