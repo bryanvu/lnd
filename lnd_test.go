@@ -556,6 +556,8 @@ func testSingleHopInvoice(net *networkHarness, t *harnessTest) {
 		t.Fatalf("unable to add invoice: %v", err)
 	}
 
+	time.Sleep(time.Millisecond * 200)
+
 	// With the invoice for Bob added, send a payment towards Alice paying
 	// to the above generated invoice.
 	time.Sleep(time.Millisecond * 500)
@@ -676,6 +678,8 @@ func testListPayments(net *networkHarness, t *harnessTest) {
 	if err != nil {
 		t.Fatalf("unable to add invoice: %v", err)
 	}
+
+	time.Sleep(time.Millisecond * 200)
 
 	// With the invoice for Bob added, send a payment towards Alice paying
 	// to the above generated invoice.
