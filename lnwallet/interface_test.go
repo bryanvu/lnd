@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -78,24 +77,6 @@ func assertProperBalance(t *testing.T, lw *lnwallet.LightningWallet, numConfirms
 		t.Fatalf("wallet credits not properly loaded, should have 40BTC, "+
 			"instead have %v", balance)
 	}
-}
-
-func assertChannelOpen(t *testing.T, miner *rpctest.Harness, numConfs uint32,
-	c <-chan *lnwallet.LightningChannel) *lnwallet.LightningChannel {
-	// Mine a single block. After this block is mined, the channel should
-	// be considered fully open.
-	if _, err := miner.Node.Generate(1); err != nil {
-		t.Fatalf("unable to generate block: %v", err)
-	}
-	select {
-	case lnc := <-c:
-		return lnc
-	case <-time.After(time.Second * 5):
-		t.Fatalf("channel never opened")
-		return nil
-	}
-
-	return nil
 }
 
 // bobNode represents the other party involved as a node within LN. Bob is our
@@ -460,7 +441,7 @@ func testDualFundingReservationWorkflow(miner *rpctest.Harness, wallet *lnwallet
 	if err != nil {
 		t.Fatalf("bob is unable to sign alice's commit tx: %v", err)
 	}
-	if err := chanReservation.CompleteReservation(bobsSigs, commitSig); err != nil {
+	if _, err := chanReservation.CompleteReservation(bobsSigs, commitSig); err != nil {
 		t.Fatalf("unable to complete funding tx: %v", err)
 	}
 
@@ -475,52 +456,6 @@ func testDualFundingReservationWorkflow(miner *rpctest.Harness, wallet *lnwallet
 	}
 	if !bytes.Equal(channels[0].FundingOutpoint.Hash[:], fundingSha[:]) {
 		t.Fatalf("channel state not properly saved")
-	}
-
-	// Assert that the channel opens after a single block.
-	lnChan := make(chan *lnwallet.LightningChannel, 1)
-	go func() {
-		openDetails, err := chanReservation.DispatchChan()
-		if err != nil {
-			t.Fatalf("unable to finalize reservation: %v", err)
-		}
-
-		lnChan <- openDetails.Channel
-	}()
-	lnc := assertChannelOpen(t, miner, uint32(numReqConfs), lnChan)
-
-	// Now that the channel is open, execute a cooperative closure of the
-	// now open channel.
-	aliceCloseSig, _, err := lnc.InitCooperativeClose()
-	if err != nil {
-		t.Fatalf("unable to init cooperative closure: %v", err)
-	}
-	aliceCloseSig = append(aliceCloseSig, byte(txscript.SigHashAll))
-
-	chanInfo := lnc.StateSnapshot()
-
-	// Obtain bob's signature for the closure transaction.
-	witnessScript := lnc.FundingWitnessScript
-	fundingOut := lnc.ChannelPoint()
-	fundingTxIn := wire.NewTxIn(fundingOut, nil, nil)
-	bobCloseTx := lnwallet.CreateCooperativeCloseTx(fundingTxIn,
-		chanInfo.RemoteBalance, chanInfo.LocalBalance,
-		lnc.RemoteDeliveryScript, lnc.LocalDeliveryScript,
-		true)
-	bobSig, err := bobNode.signCommitTx(bobCloseTx, witnessScript, int64(lnc.Capacity))
-	if err != nil {
-		t.Fatalf("unable to generate bob's signature for closing tx: %v", err)
-	}
-
-	// Broadcast the transaction to the network. This transaction should
-	// be accepted, and found in the next mined block.
-	ourKey := chanReservation.OurContribution().MultiSigKey.SerializeCompressed()
-	theirKey := chanReservation.TheirContribution().MultiSigKey.SerializeCompressed()
-	witness := lnwallet.SpendMultiSig(witnessScript, ourKey, aliceCloseSig,
-		theirKey, bobSig)
-	bobCloseTx.TxIn[0].Witness = witness
-	if err := wallet.PublishTransaction(bobCloseTx); err != nil {
-		t.Fatalf("broadcast of close tx rejected: %v", err)
 	}
 }
 
@@ -732,7 +667,7 @@ func testSingleFunderReservationWorkflowInitiator(miner *rpctest.Harness,
 	if err != nil {
 		t.Fatalf("bob is unable to sign alice's commit tx: %v", err)
 	}
-	if err := chanReservation.CompleteReservation(nil, bobCommitSig); err != nil {
+	if _, err := chanReservation.CompleteReservation(nil, bobCommitSig); err != nil {
 		t.Fatalf("unable to complete funding tx: %v", err)
 	}
 
@@ -759,17 +694,6 @@ func testSingleFunderReservationWorkflowInitiator(miner *rpctest.Harness,
 		t.Fatalf("channel type is incorrect, expected %v instead got %v",
 			channeldb.SingleFunder, channels[0].ChanType)
 	}
-
-	lnChan := make(chan *lnwallet.LightningChannel, 1)
-	go func() {
-		openDetails, err := chanReservation.DispatchChan()
-		if err != nil {
-			t.Fatalf("unable to open channel: %v", err)
-		}
-
-		lnChan <- openDetails.Channel
-	}()
-	assertChannelOpen(t, miner, uint32(numReqConfs), lnChan)
 }
 
 func testSingleFunderReservationWorkflowResponder(miner *rpctest.Harness,
@@ -909,7 +833,7 @@ func testSingleFunderReservationWorkflowResponder(miner *rpctest.Harness,
 
 	// With this stage complete, Alice can now complete the reservation.
 	bobRevokeKey := bobContribution.RevocationKey
-	err = chanReservation.CompleteReservationSingle(bobRevokeKey,
+	_, err = chanReservation.CompleteReservationSingle(bobRevokeKey,
 		fundingOutpoint, bobCommitSig, bobObsfucator)
 	if err != nil {
 		t.Fatalf("unable to complete reservation: %v", err)
@@ -919,14 +843,6 @@ func testSingleFunderReservationWorkflowResponder(miner *rpctest.Harness,
 	if chanReservation.FundingOutpoint() != fundingOutpoint {
 		t.Fatalf("funding outputs don't match: %#v vs %#v",
 			chanReservation.FundingOutpoint(), fundingOutpoint)
-	}
-
-	// Some period of time later, Bob presents us with an SPV proof
-	// attesting to an open channel. At this point Alice recognizes the
-	// channel, saves the state to disk, and creates the channel itself.
-	_, err = chanReservation.FinalizeReservation()
-	if err != nil && !strings.Contains(err.Error(), "No information") {
-		t.Fatalf("unable to finalize reservation: %v", err)
 	}
 
 	// TODO(roasbeef): bob verify alice's sig

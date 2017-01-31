@@ -465,15 +465,16 @@ type OpenChannelDetails struct {
 //
 // NOTE: If this method is called before .CompleteReservation(), it will block
 // indefinitely.
-func (r *ChannelReservation) DispatchChan() (*OpenChannelDetails, error) {
-	if err := <-r.chanOpenErr; err != nil {
-		return nil, err
-	}
+// func (r *ChannelReservation) DispatchChan() (*OpenChannelDetails, error) {
+// 	if err := <-r.chanOpenErr; err != nil {
+// 		return nil, err
+// 	}
 
-	openDetails := <-r.chanOpen
-	return &OpenChannelDetails{
-		Channel:            openDetails.channel,
-		ConfirmationHeight: openDetails.blockHeight,
-		TransactionIndex:   openDetails.txIndex,
-	}, nil
-}
+// 	openDetails := <-r.chanOpen
+
+// 	return &OpenChannelDetails{
+// 		Channel:            openDetails.channel,
+// 		ConfirmationHeight: openDetails.blockHeight,
+// 		TransactionIndex:   openDetails.txIndex,
+// 	}, nil
+// }
