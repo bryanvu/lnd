@@ -13,7 +13,7 @@ func TestNodeAnnouncementEncodeDecode(t *testing.T) {
 	cua := &NodeAnnouncement{
 		Signature: someSig,
 		Timestamp: maxUint32,
-		Address:   someAddress,
+		Addresses: someAddresses,
 		NodeID:    pubKey,
 		RGBColor:  someRGB,
 		pad:       maxUint16,
@@ -39,7 +39,7 @@ func TestNodeAnnouncementEncodeDecode(t *testing.T) {
 	}
 }
 
-func TestNodeAnnoucementValidation(t *testing.T) {
+func TestNodeAnnouncementValidation(t *testing.T) {
 	getKeys := func(s string) (*btcec.PrivateKey, *btcec.PublicKey) {
 		return btcec.PrivKeyFromBytes(btcec.S256(), []byte(s))
 	}
@@ -47,10 +47,9 @@ func TestNodeAnnoucementValidation(t *testing.T) {
 	nodePrivKey, nodePubKey := getKeys("node-id-1")
 
 	var hash []byte
-
 	na := &NodeAnnouncement{
 		Timestamp: maxUint32,
-		Address:   someAddress,
+		Addresses: someAddresses,
 		NodeID:    nodePubKey,
 		RGBColor:  someRGB,
 		pad:       maxUint16,
@@ -68,11 +67,11 @@ func TestNodeAnnoucementValidation(t *testing.T) {
 	}
 }
 
-func TestNodeAnnoucementPayloadLength(t *testing.T) {
+func TestNodeAnnouncementPayloadLength(t *testing.T) {
 	na := &NodeAnnouncement{
 		Signature: someSig,
 		Timestamp: maxUint32,
-		Address:   someAddress,
+		Addresses: someAddresses,
 		NodeID:    pubKey,
 		RGBColor:  someRGB,
 		pad:       maxUint16,
@@ -85,8 +84,8 @@ func TestNodeAnnoucementPayloadLength(t *testing.T) {
 	}
 
 	serializedLength := uint32(b.Len())
-	if serializedLength != na.MaxPayloadLength(0) {
+	if serializedLength != 154 {
 		t.Fatalf("payload length estimate is incorrect: expected %v "+
-			"got %v", serializedLength, na.MaxPayloadLength(0))
+			"got %v", serializedLength, 154)
 	}
 }

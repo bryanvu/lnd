@@ -792,7 +792,7 @@ type LightningNode struct {
 	LastUpdate time.Time
 
 	// Address is the TCP address this node is reachable over.
-	Address *net.TCPAddr
+	Addresses []net.Addr
 
 	// PubKey is the node's long-term identity public key. This key will be
 	// used to authenticated any advertisements/updates sent by the node.
@@ -1158,9 +1158,19 @@ func putLightningNode(nodeBucket *bolt.Bucket, aliasBucket *bolt.Bucket, node *L
 		return err
 	}
 
-	addrString := node.Address.String()
-	if err := wire.WriteVarString(&b, 0, addrString); err != nil {
+	numAddresses := uint16(len(node.Addresses))
+	byteOrder.PutUint16(scratch[:2], numAddresses)
+	if _, err := b.Write(scratch[:2]); err != nil {
 		return err
+	}
+
+	for _, address := range node.Addresses {
+		if err := wire.WriteVarString(&b, 0, address.Network()); err != nil {
+			return err
+		}
+		if err := wire.WriteVarString(&b, 0, address.String()); err != nil {
+			return err
+		}
 	}
 
 	if _, err := b.Write(nodePub); err != nil {
@@ -1198,8 +1208,8 @@ func fetchLightningNode(nodeBucket *bolt.Bucket,
 
 func deserializeLightningNode(r io.Reader) (*LightningNode, error) {
 	node := &LightningNode{}
-
 	var scratch [8]byte
+
 	if _, err := r.Read(scratch[:]); err != nil {
 		return nil, err
 	}
@@ -1207,19 +1217,37 @@ func deserializeLightningNode(r io.Reader) (*LightningNode, error) {
 	unix := int64(byteOrder.Uint64(scratch[:]))
 	node.LastUpdate = time.Unix(unix, 0)
 
-	addrString, err := wire.ReadVarString(r, 0)
-	if err != nil {
+	if _, err := r.Read(scratch[:2]); err != nil {
 		return nil, err
 	}
-	node.Address, err = net.ResolveTCPAddr("tcp", addrString)
-	if err != nil {
-		return nil, err
+	numAddresses := int(byteOrder.Uint16(scratch[:2]))
+
+	addresses := make([]net.Addr, 0)
+	for i := 0; i < numAddresses; i++ {
+		network, err := wire.ReadVarString(r, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		addr, err := wire.ReadVarString(r, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		address, err := net.ResolveTCPAddr(network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		addresses = append(addresses, address)
 	}
+	node.Addresses = addresses
 
 	var pub [33]byte
 	if _, err := r.Read(pub[:]); err != nil {
 		return nil, err
 	}
+	var err error
 	node.PubKey, err = btcec.ParsePubKey(pub[:], btcec.S256())
 	if err != nil {
 		return nil, err

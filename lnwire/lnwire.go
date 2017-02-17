@@ -292,16 +292,48 @@ func writeElement(w io.Writer, element interface{}) error {
 		}
 
 	case *net.TCPAddr:
-		var ip [16]byte
-		copy(ip[:], e.IP.To16())
-		if _, err := w.Write(ip[:]); err != nil {
+		switch net := e.Network(); net {
+		case "tcp", "tcp4":
+			var descriptor [1]byte
+			descriptor[0] = 1
+			if _, err := w.Write(descriptor[:]); err != nil {
+				return err
+			}
+
+			var ip [4]byte
+			copy(ip[:], e.IP.To4())
+			if _, err := w.Write(ip[:]); err != nil {
+				return err
+			}
+
+		case "tcp6":
+			var descriptor [1]byte
+			descriptor[0] = 2
+			if _, err := w.Write(descriptor[:]); err != nil {
+				return err
+			}
+			var ip [16]byte
+			copy(ip[:], e.IP.To16())
+			if _, err := w.Write(ip[:]); err != nil {
+				return err
+			}
+		}
+		var port [2]byte
+		binary.BigEndian.PutUint16(port[:], uint16(e.Port))
+		if _, err := w.Write(port[:]); err != nil {
+			return err
+		}
+	case []net.Addr:
+		// Write out the number of addresses.
+		if err := writeElement(w, uint16(len(e))); err != nil {
 			return err
 		}
 
-		var port [4]byte
-		binary.BigEndian.PutUint32(port[:], uint32(e.Port))
-		if _, err := w.Write(port[:]); err != nil {
-			return err
+		// Append the actual addresses.
+		for _, address := range e {
+			if err := writeElement(w, address); err != nil {
+				return err
+			}
 		}
 	case RGB:
 		err := writeElements(w,
@@ -578,21 +610,44 @@ func readElement(r io.Reader, element interface{}) error {
 			TxPosition:  binary.BigEndian.Uint16(txPosition[:]),
 		}
 
-	case **net.TCPAddr:
-		var ip [16]byte
-		if _, err = io.ReadFull(r, ip[:]); err != nil {
+	case *[]net.Addr:
+		var addresses []net.Addr
+		var numAddrs [2]byte
+		if _, err = io.ReadFull(r, numAddrs[:]); err != nil {
 			return err
 		}
 
-		var port [4]byte
-		if _, err = io.ReadFull(r, port[:]); err != nil {
-			return err
-		}
+		for i := 0; i < int(binary.BigEndian.Uint16(numAddrs[:])); i++ {
+			var descriptor [1]byte
+			if _, err = io.ReadFull(r, descriptor[:]); err != nil {
+				return err
+			}
 
-		*e = &net.TCPAddr{
-			IP:   (net.IP)(ip[:]),
-			Port: int(binary.BigEndian.Uint32(port[:])),
+			address := &net.TCPAddr{}
+			switch descriptor[0] {
+			case 1:
+				var ip [4]byte
+				if _, err = io.ReadFull(r, ip[:]); err != nil {
+					return err
+				}
+				address.IP = (net.IP)(ip[:])
+			case 2:
+				var ip [16]byte
+				if _, err = io.ReadFull(r, ip[:]); err != nil {
+					return err
+				}
+				address.IP = (net.IP)(ip[:])
+			}
+
+			var port [2]byte
+			if _, err = io.ReadFull(r, port[:]); err != nil {
+				return err
+			}
+
+			address.Port = int(binary.BigEndian.Uint16(port[:]))
+			addresses = append(addresses, address)
 		}
+		*e = addresses
 	case *RGB:
 		err := readElements(r,
 			&e.red,
