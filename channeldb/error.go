@@ -30,4 +30,6 @@ var (
 	ErrNodeAliasNotFound = fmt.Errorf("alias for node not found")
 
 	ErrSourceNodeNotSet = fmt.Errorf("source node does not exist")
+
+	ErrUnknownAddressType = fmt.Errorf("address type cannot be resolved")
 )

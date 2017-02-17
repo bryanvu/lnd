@@ -81,7 +81,7 @@ type NodeAnnouncement struct {
 
 	// Address includes two specification fields: 'ipv6' and 'port' on which
 	// the node is accepting incoming connections.
-	Address *net.TCPAddr
+	Addresses []net.Addr
 
 	// NodeID is a public key which is used as node identification.
 	NodeID *btcec.PublicKey
@@ -117,7 +117,7 @@ func (c *NodeAnnouncement) Decode(r io.Reader, pver uint32) error {
 	err := readElements(r,
 		&c.Signature,
 		&c.Timestamp,
-		&c.Address,
+		&c.Addresses,
 		&c.NodeID,
 		&c.RGBColor,
 		&c.pad,
@@ -138,7 +138,7 @@ func (c *NodeAnnouncement) Encode(w io.Writer, pver uint32) error {
 	err := writeElements(w,
 		c.Signature,
 		c.Timestamp,
-		c.Address,
+		c.Addresses,
 		c.NodeID,
 		c.RGBColor,
 		c.pad,
@@ -164,34 +164,19 @@ func (c *NodeAnnouncement) Command() uint32 {
 //
 // This is part of the lnwire.Message interface.
 func (c *NodeAnnouncement) MaxPayloadLength(pver uint32) uint32 {
-	var length uint32
-
 	// Signature - 64 bytes
-	length += 64
-
 	// Timestamp - 4 bytes
-	length += 4
-
-	// Ipv6 - 16 bytes
-	length += 16
-
-	// Port - 4 bytes
-	length += 4
-
+	// NumAddresses - 2 bytes
+	// AddressDescriptor - 1 byte
+	// Ipv4 - 4 bytes (optional)
+	// Port - 2 bytes (optional)
 	// NodeID - 33 bytes
-	length += 33
-
 	// RGBColor - 3 bytes
-	length += 3
-
 	// pad - 2 bytes
-	length += 2
-
 	// Alias - 32 bytes
-	length += 32
 
-	// 158
-	return length
+	// Base size, 140, but can be variable due to multiple addresses
+	return 8192
 }
 
 // dataToSign...
@@ -201,7 +186,7 @@ func (c *NodeAnnouncement) DataToSign() ([]byte, error) {
 	var w bytes.Buffer
 	err := writeElements(&w,
 		c.Timestamp,
-		c.Address,
+		c.Addresses,
 		c.NodeID,
 		c.RGBColor,
 		c.pad,
