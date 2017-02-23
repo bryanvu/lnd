@@ -2069,6 +2069,40 @@ func testGraphTopologyNotifications(net *networkHarness, t *harnessTest) {
 	}
 }
 
+// testNodeAnnouncement ensures that when a node is started with one or more
+// external IP addresses specified on the command line, that those addresses
+// announced to the network and reported in the network graph.
+func testNodeAnnouncement(net *networkHarness, t *harnessTest) {
+	ctxb := context.Background()
+
+	lndArgs := []string{"--externalip=192.168.1.1:8333",
+		"--externalip=[2001:db8:85a3:8d3:1319:8a2e:370:7348]:8337",
+		"--externalip=127.0.0.1:8335"}
+	dave, err := net.NewNode(lndArgs)
+	if err != nil {
+		t.Fatalf("unable to create new nodes: %v", err)
+	}
+
+	if err := net.ConnectNodes(ctxb, net.Alice, dave); err != nil {
+		t.Fatalf("unable to connect bob to carol: %v", err)
+	}
+
+	req := &lnrpc.ChannelGraphRequest{}
+	chanGraph, err := net.Alice.DescribeGraph(ctxb, req)
+	if err != nil {
+		t.Fatalf("unable to query for alice's routing table: %v", err)
+	}
+
+	for _, node := range chanGraph.Nodes {
+		if node.PubKey == dave.PubKeyStr {
+			if len(node.Addresses) != 3 {
+				t.Fatalf("expecting dave to have 3 addresses,"+
+					" got: %v", len(node.Addresses))
+			}
+		}
+	}
+}
+
 type testCase struct {
 	name string
 	test func(net *networkHarness, t *harnessTest)
@@ -2122,6 +2156,10 @@ var testsCases = []*testCase{
 	{
 		name: "multi-hop htlc error propagation",
 		test: testHtlcErrorPropagation,
+	},
+	{
+		name: "node announcement",
+		test: testNodeAnnouncement,
 	},
 	{
 		// TODO(roasbeef): test always needs to be last as Bob's state
