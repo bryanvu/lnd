@@ -134,7 +134,7 @@ type peer struct {
 	// remoteCloseChanReqs is a channel in which any remote requests
 	// (initiated by the remote peer) close a particular channel are sent
 	// over.
-	remoteCloseChanReqs chan *lnwire.CloseRequest
+	remoteCloseChanReqs chan *lnwire.ClosingSigned
 
 	server *server
 
@@ -181,7 +181,7 @@ func newPeer(conn net.Conn, connReq *connmgr.ConnReq, server *server,
 		newChannels:      make(chan *newChannelMsg, 1),
 
 		localCloseChanReqs:  make(chan *closeLinkReq),
-		remoteCloseChanReqs: make(chan *lnwire.CloseRequest),
+		remoteCloseChanReqs: make(chan *lnwire.ClosingSigned),
 
 		localSharedFeatures:  nil,
 		globalSharedFeatures: nil,
@@ -441,7 +441,7 @@ out:
 			p.server.fundingMgr.processFundingSignComplete(msg, p.addr)
 		case *lnwire.FundingLocked:
 			p.server.fundingMgr.processFundingLocked(msg, p.addr)
-		case *lnwire.CloseRequest:
+		case *lnwire.ClosingSigned:
 			p.remoteCloseChanReqs <- msg
 
 		case *lnwire.Error:
@@ -833,7 +833,7 @@ func (p *peer) executeCooperativeClose(channel *lnwallet.LightningChannel) (*cha
 	}
 
 	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
-	closeReq := lnwire.NewCloseRequest(chanID, closeSig)
+	closeReq := lnwire.NewClosingSigned(chanID, 5000, closeSig)
 	p.queueMsg(closeReq, nil)
 
 	return txid, nil
@@ -943,13 +943,13 @@ func (p *peer) handleLocalClose(req *closeLinkReq) {
 
 // handleRemoteClose completes a request for cooperative channel closure
 // initiated by the remote node.
-func (p *peer) handleRemoteClose(req *lnwire.CloseRequest) {
+func (p *peer) handleRemoteClose(req *lnwire.ClosingSigned) {
 	p.activeChanMtx.RLock()
-	channel, ok := p.activeChannels[req.ChanID]
+	channel, ok := p.activeChannels[req.ChannelID]
 	p.activeChanMtx.RUnlock()
 	if !ok {
 		peerLog.Errorf("unable to close channel, ChannelID(%v) is "+
-			"unknown", req.ChanID)
+			"unknown", req.ChannelID)
 		return
 	}
 
@@ -958,7 +958,7 @@ func (p *peer) handleRemoteClose(req *lnwire.CloseRequest) {
 	// Now that we have their signature for the closure transaction, we
 	// can assemble the final closure transaction, complete with our
 	// signature.
-	sig := req.RequesterCloseSig
+	sig := req.Signature
 	closeSig := append(sig.Serialize(), byte(txscript.SigHashAll))
 	closeTx, err := channel.CompleteCooperativeClose(closeSig)
 	if err != nil {
