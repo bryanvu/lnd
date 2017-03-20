@@ -99,6 +99,9 @@ type NodeAnnouncement struct {
 	// Alias is used to customize their node's appearance in maps and graphs
 	Alias Alias
 
+	// Features is the list of protocol features this node supports.
+	Features *FeatureVector
+
 	// Address includes two specification fields: 'ipv6' and 'port' on which
 	// the node is accepting incoming connections.
 	Addresses []net.Addr
@@ -132,6 +135,7 @@ func (a *NodeAnnouncement) Decode(r io.Reader, pver uint32) error {
 		&a.RGBColor,
 		&a.Alias,
 		&a.Addresses,
+		&a.Features,
 		&a.pad,
 	)
 }
@@ -147,6 +151,7 @@ func (a *NodeAnnouncement) Encode(w io.Writer, pver uint32) error {
 		a.RGBColor,
 		a.Alias,
 		a.Addresses,
+		a.Features,
 		a.pad,
 	)
 }
@@ -169,6 +174,7 @@ func (a *NodeAnnouncement) MaxPayloadLength(pver uint32) uint32 {
 	// NodeID - 33 bytes
 	// RGBColor - 3 bytes
 	// Alias - 32 bytes
+	// Features - variable
 	// NumAddresses - 2 bytes
 	// AddressDescriptor - 1 byte
 	// Ipv4 - 4 bytes (optional)
@@ -191,6 +197,7 @@ func (a *NodeAnnouncement) DataToSign() ([]byte, error) {
 		a.RGBColor,
 		a.Alias,
 		a.Addresses,
+		a.Features,
 		a.pad,
 	)
 	if err != nil {

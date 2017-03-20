@@ -10,32 +10,38 @@ import (
 )
 
 func TestNodeAnnouncementEncodeDecode(t *testing.T) {
-	cua := &NodeAnnouncement{
+	na := &NodeAnnouncement{
 		Signature: someSig,
 		Timestamp: maxUint32,
-		Addresses: someAddresses,
 		NodeID:    pubKey,
 		RGBColor:  someRGB,
-		pad:       maxUint16,
 		Alias:     someAlias,
+		Features:  someFeatures,
+		Addresses: someAddresses,
+		pad:       maxUint16,
 	}
 
 	// Next encode the NA message into an empty bytes buffer.
 	var b bytes.Buffer
-	if err := cua.Encode(&b, 0); err != nil {
+	if err := na.Encode(&b, 0); err != nil {
 		t.Fatalf("unable to encode NodeAnnouncement: %v", err)
 	}
 
 	// Deserialize the encoded NA message into a new empty struct.
-	cua2 := &NodeAnnouncement{}
-	if err := cua2.Decode(&b, 0); err != nil {
+	na2 := &NodeAnnouncement{}
+	if err := na2.Decode(&b, 0); err != nil {
 		t.Fatalf("unable to decode NodeAnnouncement: %v", err)
 	}
 
+	// We do not encode the feature map in feature vector, for that reason
+	// the node announcement messages will differ. Set feature map with nil
+	// in order to use deep equal function.
+	na.Features.featuresMap = nil
+
 	// Assert equality of the two instances.
-	if !reflect.DeepEqual(cua, cua2) {
+	if !reflect.DeepEqual(na, na2) {
 		t.Fatalf("encode/decode error messages don't match %#v vs %#v",
-			cua, cua2)
+			na, na2)
 	}
 }
 
@@ -52,8 +58,9 @@ func TestNodeAnnouncementValidation(t *testing.T) {
 		Addresses: someAddresses,
 		NodeID:    nodePubKey,
 		RGBColor:  someRGB,
-		pad:       maxUint16,
 		Alias:     someAlias,
+		Features:  someFeatures,
+		pad:       maxUint16,
 	}
 
 	dataToSign, _ := na.DataToSign()
@@ -71,11 +78,12 @@ func TestNodeAnnouncementPayloadLength(t *testing.T) {
 	na := &NodeAnnouncement{
 		Signature: someSig,
 		Timestamp: maxUint32,
-		Addresses: someAddresses,
 		NodeID:    pubKey,
 		RGBColor:  someRGB,
-		pad:       maxUint16,
 		Alias:     someAlias,
+		Features:  someFeatures,
+		Addresses: someAddresses,
+		pad:       maxUint16,
 	}
 
 	var b bytes.Buffer
@@ -84,9 +92,9 @@ func TestNodeAnnouncementPayloadLength(t *testing.T) {
 	}
 
 	serializedLength := uint32(b.Len())
-	if serializedLength != 166 {
+	if serializedLength != 169 {
 		t.Fatalf("payload length estimate is incorrect: expected %v "+
-			"got %v", 166, serializedLength)
+			"got %v", 169, serializedLength)
 	}
 
 	if na.MaxPayloadLength(0) != 8192 {
