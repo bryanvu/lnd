@@ -133,6 +133,9 @@ func newLightningNode(rpcConfig *btcrpcclient.ConnConfig, lndArgs []string) (*li
 
 	numActiveNodes++
 
+	lndArgs = append(lndArgs, "--externalip=127.0.0.1:"+
+		strconv.Itoa(cfg.PeerPort))
+
 	return &lightningNode{
 		cfg:               cfg,
 		p2pAddr:           net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.PeerPort)),
@@ -238,6 +241,8 @@ func (l *lightningNode) Start(lndError chan error) error {
 	}
 	copy(l.PubKey[:], pubkey)
 
+	fmt.Println("log dir: ", l.cfg.LogDir)
+
 	// Launch the watcher that'll hook into graph related topology change
 	// from the PoV of this node.
 	l.wg.Add(1)
@@ -249,7 +254,7 @@ func (l *lightningNode) Start(lndError chan error) error {
 // cleanup cleans up all the temporary files created by the node's process.
 func (l *lightningNode) cleanup() error {
 	dirs := []string{
-		l.cfg.LogDir,
+		// l.cfg.LogDir,
 		l.cfg.DataDir,
 	}
 

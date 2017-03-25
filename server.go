@@ -243,37 +243,81 @@ func newServer(listenAddrs []string, notifier chainntnfs.ChainNotifier,
 	// In order to promote liveness of our active channels, instruct the
 	// connection manager to attempt to establish and maintain persistent
 	// connections to all our direct channel counterparties.
+	var lnAddrs map[*btcec.PublicKey]*net.TCPAddr
+	var nodesMissingAddrs []string
+
+	sourceNode, err := chanGraph.SourceNode()
+	if err != nil {
+		return nil, err
+	}
+	srvrLog.Debugf("sourceNode: %+v", sourceNode)
+	err = sourceNode.ForEachChannel(nil, func(_ *channeldb.ChannelEdgeInfo,
+		policy *channeldb.ChannelEdgePolicy) error {
+
+		srvrLog.Debugf("policy: %v", policy)
+		pubStr := string(policy.Node.PubKey.SerializeCompressed())
+		if policy.Node.Addresses == nil {
+			nodesMissingAddrs = append(nodesMissingAddrs, pubStr)
+		}
+
+		// In case a node has multiple addresses, attempt to connect to
+		// each of them.
+		for _, address := range policy.Node.Addresses {
+			if address.(*net.TCPAddr).Port == 0 {
+				address.(*net.TCPAddr).Port = defaultPeerPort
+			}
+			lnAddrs[policy.Node.PubKey] = address.(*net.TCPAddr)
+		}
+		return nil
+	})
+	if err != nil && err != channeldb.ErrGraphNoEdgesFound {
+		return nil, err
+	}
+
 	linkNodes, err := s.chanDB.FetchAllLinkNodes()
 	if err != nil && err != channeldb.ErrLinkNodesNotFound {
 		return nil, err
 	}
-	for _, node := range linkNodes {
-		pubStr := string(node.IdentityPub.SerializeCompressed())
-
-		// In case a node has multiple addresses, attempt to connect to
-		// each of them.
-		for _, address := range node.Addresses {
-			// Create a wrapper address which couples the IP and the pubkey
-			// so the brontide authenticated connection can be established.
-			lnAddr := &lnwire.NetAddress{
-				IdentityKey: node.IdentityPub,
-				Address:     address,
+	for _, nodePubKey := range nodesMissingAddrs {
+		srvrLog.Debugf("nodePubKey: %v", nodePubKey)
+		for _, node := range linkNodes {
+			pubStr := string(node.IdentityPub.SerializeCompressed())
+			if pubStr == nodePubKey {
+				address := node.Addresses[0]
+				address.Port = defaultPeerPort
+				lnAddrs[node.IdentityPub] = address
 			}
-			srvrLog.Debugf("Attempting persistent connection to channel "+
-				"peer %v", lnAddr)
-
-			// Send the persistent connection request to the connection
-			// manager, saving the request itself so we can cancel/restart
-			// the process as needed.
-			// TODO(roasbeef): use default addr
-			connReq := &connmgr.ConnReq{
-				Addr:      lnAddr,
-				Permanent: true,
-			}
-			s.persistentConnReqs[pubStr] =
-				append(s.persistentConnReqs[pubStr], connReq)
-			go s.connMgr.Connect(connReq)
 		}
+	}
+
+	srvrLog.Debugf("lnAddrs: %v", lnAddrs)
+
+	// TODO(bvu): add comment
+	for pubKey, addr := range lnAddrs {
+		// Create a wrapper address which couples the IP and the pubkey
+		// so the brontide authenticated connection can be established.
+		lnAddr := &lnwire.NetAddress{
+			IdentityKey: pubKey,
+			Address:     addr,
+		}
+		srvrLog.Debugf("Attempting persistent connection to "+
+			"channel peer %v", lnAddr)
+		// Send the persistent connection request to
+		// the connection manager, saving the request
+		// itself so we can cancel/restart the process
+		// as needed.
+		// TODO(roasbeef): use default addr
+		connReq := &connmgr.ConnReq{
+			Addr:      lnAddr,
+			Permanent: true,
+		}
+
+		pubStr := string(pubKey.SerializeCompressed())
+		srvrLog.Debugf("pubStr: %v\n", pubStr)
+		srvrLog.Debugf("lnAddr: %v\n", lnAddr)
+		s.persistentConnReqs[pubStr] =
+			append(s.persistentConnReqs[pubStr], connReq)
+		go s.connMgr.Connect(connReq)
 	}
 
 	return s, nil
