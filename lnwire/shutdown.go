@@ -22,7 +22,9 @@ type Shutdown struct {
 	Address Address
 }
 
-// Address -- TODO(bvu): add comment
+// Address is used to communicate the address to which funds from a closed
+// channel should be sent. This is distinct type so as to convey how it should
+// be encoded and decoded.
 type Address []byte
 
 // NewShutdown creates a new Shutdown message.

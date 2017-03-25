@@ -131,10 +131,13 @@ type peer struct {
 	// a particular channel are sent over.
 	localCloseChanReqs chan *closeLinkReq
 
-	// remoteCloseChanReqs is a channel in which any remote requests
-	// (initiated by the remote peer) close a particular channel are sent
-	// over.
-	remoteCloseChanReqs chan *lnwire.ClosingSigned
+	// shutdownChanReqs is used to send the Shutdown messages that initiate
+	// the cooperative close workflow.
+	shutdownChanReqs chan *lnwire.Shutdown
+
+	// closingSignedChanReqs is used to send signatures for proposed
+	// channel close transactions during the cooperative close workflow.
+	closingSignedChanReqs chan *lnwire.ClosingSigned
 
 	server *server
 
@@ -180,8 +183,9 @@ func newPeer(conn net.Conn, connReq *connmgr.ConnReq, server *server,
 		chanSnapshotReqs: make(chan *chanSnapshotReq),
 		newChannels:      make(chan *newChannelMsg, 1),
 
-		localCloseChanReqs:  make(chan *closeLinkReq),
-		remoteCloseChanReqs: make(chan *lnwire.ClosingSigned),
+		localCloseChanReqs:    make(chan *closeLinkReq),
+		shutdownChanReqs:      make(chan *lnwire.Shutdown),
+		closingSignedChanReqs: make(chan *lnwire.ClosingSigned),
 
 		localSharedFeatures:  nil,
 		globalSharedFeatures: nil,
@@ -441,8 +445,11 @@ out:
 			p.server.fundingMgr.processFundingSignComplete(msg, p.addr)
 		case *lnwire.FundingLocked:
 			p.server.fundingMgr.processFundingLocked(msg, p.addr)
+
+		case *lnwire.Shutdown:
+			p.shutdownChanReqs <- msg
 		case *lnwire.ClosingSigned:
-			p.remoteCloseChanReqs <- msg
+			p.closingSignedChanReqs <- msg
 
 		case *lnwire.Error:
 			p.server.fundingMgr.processFundingError(msg, p.addr)
@@ -742,6 +749,8 @@ func (p *peer) ChannelSnapshots() []*channeldb.ChannelSnapshot {
 //
 // NOTE: This method MUST be run as a goroutine.
 func (p *peer) channelManager() {
+	var localCloseInitsMtx sync.RWMutex
+	localCloseInits := make(map[lnwire.ChannelID]*closeLinkReq)
 out:
 	for {
 		select {
@@ -791,10 +800,38 @@ out:
 			close(newChanReq.done)
 
 		case req := <-p.localCloseChanReqs:
+			chanID := lnwire.NewChanIDFromOutPoint(req.chanPoint)
+			localCloseInitsMtx.Lock()
+			localCloseInits[chanID] = req
+			localCloseInitsMtx.Unlock()
+
 			p.handleLocalClose(req)
 
-		case req := <-p.remoteCloseChanReqs:
-			p.handleRemoteClose(req)
+		case req := <-p.shutdownChanReqs:
+			localCloseInitsMtx.RLock()
+			_, ok := localCloseInits[req.ChannelID]
+			localCloseInitsMtx.RUnlock()
+			if !ok {
+				// we're the responder.
+				p.handleShutdownResponse(req)
+			}
+
+		case req := <-p.closingSignedChanReqs:
+			localCloseInitsMtx.RLock()
+			localCloseReq, ok := localCloseInits[req.ChannelID]
+			localCloseInitsMtx.RUnlock()
+			if ok {
+				// we're the initiator
+				p.handleInitClosingSigned(localCloseReq, req)
+
+				// this won't work if there's fee disagreement
+				localCloseInitsMtx.Lock()
+				delete(localCloseInits, req.ChannelID)
+				localCloseInitsMtx.Unlock()
+			} else {
+				// we're the responder
+				p.handleResponseClosingSigned(req)
+			}
 
 		case <-p.quit:
 			break out
@@ -804,51 +841,11 @@ out:
 	p.wg.Done()
 }
 
-// executeCooperativeClose executes the initial phase of a user-executed
-// cooperative channel close. The channel state machine is transitioned to the
-// closing phase, then our half of the closing witness is sent over to the
-// remote peer.
-func (p *peer) executeCooperativeClose(channel *lnwallet.LightningChannel) (*chainhash.Hash, error) {
-	// Shift the channel state machine into a 'closing' state. This
-	// generates a signature for the closing tx, as well as a txid of the
-	// closing tx itself, allowing us to watch the network to determine
-	// when the remote node broadcasts the fully signed closing
-	// transaction.
-	sig, txid, err := channel.InitCooperativeClose()
-	if err != nil {
-		return nil, err
-	}
-
-	chanPoint := channel.ChannelPoint()
-	peerLog.Infof("Executing cooperative closure of "+
-		"ChanPoint(%v) with peerID(%v), txid=%v", chanPoint, p.id, txid)
-
-	// With our signature for the close tx generated, send the signature to
-	// the remote peer instructing it to close this particular channel
-	// point.
-	// TODO(roasbeef): remove encoding redundancy
-	closeSig, err := btcec.ParseSignature(sig, btcec.S256())
-	if err != nil {
-		return nil, err
-	}
-
-	chanID := lnwire.NewChanIDFromOutPoint(chanPoint)
-	closeReq := lnwire.NewClosingSigned(chanID, 5000, closeSig)
-	p.queueMsg(closeReq, nil)
-
-	return txid, nil
-}
-
 // handleLocalClose kicks-off the workflow to execute a cooperative or forced
 // unilateral closure of the channel initiated by a local subsystem.
 // TODO(roasbeef): if no more active channels with peer call Remove on connMgr
 // with peerID
 func (p *peer) handleLocalClose(req *closeLinkReq) {
-	var (
-		err         error
-		closingTxid *chainhash.Hash
-	)
-
 	chanID := lnwire.NewChanIDFromOutPoint(req.chanPoint)
 
 	p.activeChanMtx.RLock()
@@ -860,10 +857,10 @@ func (p *peer) handleLocalClose(req *closeLinkReq) {
 	// out this channel on-chian, so we execute the cooperative channel
 	// closure workflow.
 	case CloseRegular:
-		closingTxid, err = p.executeCooperativeClose(channel)
-		peerLog.Infof("Attempting cooperative close of "+
-			"ChannelPoint(%v) with txid: %v", req.chanPoint,
-			closingTxid)
+		err := p.sendShutdown(channel)
+		if err != nil {
+			req.err <- err
+		}
 
 	// A type of CloseBreach indicates that the counterparty has breached
 	// the channel therefore we need to clean up our local state.
@@ -878,8 +875,77 @@ func (p *peer) handleLocalClose(req *closeLinkReq) {
 		}
 		return
 	}
+}
+
+// handleShutdownResponse is called when a responder in a cooperative channel
+// close workflow receives a Shutdown message. This is the second step in the
+// cooperative close workflow. This function generates a close transaction with
+// a proposed fee amount and sends the signed transaction to the initiator.
+func (p *peer) handleShutdownResponse(msg *lnwire.Shutdown) {
+	p.activeChanMtx.RLock()
+	channel, ok := p.activeChannels[msg.ChannelID]
+	p.activeChanMtx.RUnlock()
+	if !ok {
+		peerLog.Errorf("unable to close channel, ChannelPoint(%v) is "+
+			"unknown", msg.ChannelID)
+		return
+	}
+	err := p.sendShutdown(channel)
+	if err != nil {
+		peerLog.Errorf("error while sending shutdown message: %v", err)
+		return
+	}
+
+	// TODO(bvu): add logic to wait for HTLCs to close here.
+	err = p.sendClosingSigned(channel)
+	if err != nil {
+		peerLog.Errorf("error generating/sending ClosingSigned: %v", err)
+		return
+	}
+	return
+}
+
+// handleInitClosingSigned is called when the initiator in a cooperative
+// channel close workflow receives a ClosingSigned message from the responder.
+// This function sends back a corresponding ClosingSigned message, then
+// broadcasts the channel close transaction. It also performs channel cleanup
+// and reports status back to the caller. This is the initiator's final step in
+// the channel close workflow.
+func (p *peer) handleInitClosingSigned(req *closeLinkReq, msg *lnwire.ClosingSigned) {
+	chanID := lnwire.NewChanIDFromOutPoint(req.chanPoint)
+
+	p.activeChanMtx.RLock()
+	channel := p.activeChannels[chanID]
+	p.activeChanMtx.RUnlock()
+
+	err := p.sendClosingSigned(channel)
 	if err != nil {
 		req.err <- err
+	}
+
+	// verify signatures and mark channel closed
+	sig := msg.Signature
+	closeSig := append(sig.Serialize(), byte(txscript.SigHashAll))
+	closeTx, err := channel.CompleteCooperativeClose(closeSig)
+	if err != nil {
+		req.err <- err
+		// TODO(roasbeef): send ErrorGeneric to other side
+		return
+	}
+
+	closingTxid := closeTx.TxHash()
+
+	peerLog.Infof("Broadcasting cooperative close tx: %v",
+		newLogClosure(func() string {
+			return spew.Sdump(closeTx)
+		}))
+
+	// Finally, broadcast the closure transaction, to the network.
+	if err := p.server.lnwallet.PublishTransaction(closeTx); err != nil {
+		peerLog.Errorf("channel close tx from "+
+			"ChannelPoint(%v) rejected: %v",
+			req.chanPoint, err)
+		// TODO(roasbeef): send ErrorGeneric to other side
 		return
 	}
 
@@ -893,37 +959,14 @@ func (p *peer) handleLocalClose(req *closeLinkReq) {
 		},
 	}
 
-	// Finally, launch a goroutine which will request to be notified by the
-	// ChainNotifier once the closure transaction obtains a single
-	// confirmation.
 	go func() {
-		// TODO(roasbeef): add param for num needed confs
-		notifier := p.server.chainNotifier
-		confNtfn, err := notifier.RegisterConfirmationsNtfn(closingTxid, 1)
-		if err != nil {
-			req.err <- err
-			return
-		}
+		doneChan := make(chan struct{})
+		go p.waitForCloseConfirmation(channel, closingTxid, doneChan)
 
 		select {
-		case height, ok := <-confNtfn.Confirmed:
-			// In the case that the ChainNotifier is shutting down,
-			// all subscriber notification channels will be closed,
-			// generating a nil receive.
-			if !ok {
-				return
-			}
-
-			// The channel has been closed, remove it from any
-			// active indexes, and the database state.
-			peerLog.Infof("ChannelPoint(%v) is now closed at "+
-				"height %v", req.chanPoint, height.BlockHeight)
-			if err := wipeChannel(p, channel); err != nil {
-				req.err <- err
-				return
-			}
 		case <-p.quit:
 			return
+		case <-doneChan:
 		}
 
 		// Respond to the local subsystem which requested the channel
@@ -936,60 +979,120 @@ func (p *peer) handleLocalClose(req *closeLinkReq) {
 				},
 			},
 		}
-
-		p.server.breachArbiter.settledContracts <- req.chanPoint
 	}()
 }
 
-// handleRemoteClose completes a request for cooperative channel closure
-// initiated by the remote node.
-func (p *peer) handleRemoteClose(req *lnwire.ClosingSigned) {
+// handleResponseClosingSigned is called when the responder in a cooperative
+// close workflow receives a ClosingSigned message. This function handles the
+// finalization of the cooperative close from the perspective of the responder.
+func (p *peer) handleResponseClosingSigned(msg *lnwire.ClosingSigned) {
 	p.activeChanMtx.RLock()
-	channel, ok := p.activeChannels[req.ChannelID]
+	channel := p.activeChannels[msg.ChannelID]
 	p.activeChanMtx.RUnlock()
-	if !ok {
-		peerLog.Errorf("unable to close channel, ChannelID(%v) is "+
-			"unknown", req.ChannelID)
-		return
-	}
 
-	chanPoint := channel.ChannelPoint()
-
-	// Now that we have their signature for the closure transaction, we
-	// can assemble the final closure transaction, complete with our
-	// signature.
-	sig := req.Signature
+	// verify signatures and mark channel closed
+	sig := msg.Signature
 	closeSig := append(sig.Serialize(), byte(txscript.SigHashAll))
 	closeTx, err := channel.CompleteCooperativeClose(closeSig)
 	if err != nil {
 		peerLog.Errorf("unable to complete cooperative "+
 			"close for ChannelPoint(%v): %v",
-			chanPoint, err)
+			channel.ChannelPoint(), err)
 		// TODO(roasbeef): send ErrorGeneric to other side
 		return
 	}
 
-	peerLog.Infof("Broadcasting cooperative close tx: %v",
-		newLogClosure(func() string {
-			return spew.Sdump(closeTx)
-		}))
+	closingTxid := closeTx.TxHash()
+	// Finally, launch a goroutine which will request to be notified by the
+	// ChainNotifier once the closure transaction obtains a single
+	// confirmation.
+	go p.waitForCloseConfirmation(channel, closingTxid, nil)
+}
 
-	// Finally, broadcast the closure transaction, to the network.
-	if err := p.server.lnwallet.PublishTransaction(closeTx); err != nil {
-		peerLog.Errorf("channel close tx from "+
-			"ChannelPoint(%v) rejected: %v",
-			chanPoint, err)
-		// TODO(roasbeef): send ErrorGeneric to other side
+// sendShutdown handles the creation and sending of the Shutdown messages
+// sent between peers to initiate the cooperative channel close workflow. In
+// addition, sendShutdown also signals to the HTLC switch to stop accepting
+// HTLCs for the specified channel.
+func (p *peer) sendShutdown(channel *lnwallet.LightningChannel) error {
+	_, addrs, _, err :=
+		txscript.ExtractPkScriptAddrs(channel.LocalDeliveryScript,
+			activeNetParams.Params)
+	if err != nil {
+		return err
+	}
+	address := lnwire.Address(addrs[0].ScriptAddress())
+	chanID := lnwire.NewChanIDFromOutPoint(channel.ChannelPoint())
+
+	shutdown := lnwire.NewShutdown(chanID, address)
+	p.queueMsg(shutdown, nil)
+
+	// Prevent the HTLC switch from receiving additional HTLCs for
+	// this channel.
+	p.server.htlcSwitch.UnregisterLink(p.addr.IdentityKey, &chanID)
+
+	return nil
+}
+
+// sendClosingSigned handles the creation and sending of  proposed channel
+// close transactions.
+func (p *peer) sendClosingSigned(channel *lnwallet.LightningChannel) error {
+	// We agree with the proposed fee, so we send back our signature
+	// for the proposed transaction.
+	closeSig, err := channel.CreateCloseProposal()
+	if err != nil {
+		return err
+	}
+	chanID := lnwire.NewChanIDFromOutPoint(channel.ChannelPoint())
+	closingSigned := lnwire.NewClosingSigned(chanID, 5000, closeSig)
+	p.queueMsg(closingSigned, nil)
+
+	return nil
+}
+
+// waitForCloseConfirmation handles the process of finalizing a cooperative
+// close when the channel close transaction and received the requisite number
+// of confirmations.
+func (p *peer) waitForCloseConfirmation(channel *lnwallet.LightningChannel,
+	closingTxid chainhash.Hash, doneChan chan struct{}) {
+
+	if doneChan != nil {
+		defer close(doneChan)
+	}
+
+	peerLog.Infof("Waiting for confirmation of cooperative close of "+
+		"ChannelPoint(%v) with txid: %v", channel.ChannelPoint(),
+		closingTxid)
+
+	// TODO(roasbeef): add param for num needed confs
+	notifier := p.server.chainNotifier
+	confNtfn, err := notifier.RegisterConfirmationsNtfn(&closingTxid, 1)
+	if err != nil {
+		peerLog.Errorf("Error registering confirmation: %v", err)
 		return
 	}
 
-	// TODO(roasbeef): also wait for confs before removing state
-	peerLog.Infof("ChannelPoint(%v) is now closed", chanPoint)
-	if err := wipeChannel(p, channel); err != nil {
-		peerLog.Errorf("unable to wipe channel: %v", err)
+	select {
+	case height, ok := <-confNtfn.Confirmed:
+		// In the case that the ChainNotifier is shutting down,
+		// all subscriber notification channels will be closed,
+		// generating a nil receive.
+		if !ok {
+			return
+		}
+
+		// The channel has been closed, remove it from any
+		// active indexes, and the database state.
+		peerLog.Infof("ChannelPoint(%v) is now closed at "+
+			"height %v", channel.ChannelPoint(), height.BlockHeight)
+		if err := wipeChannel(p, channel); err != nil {
+			peerLog.Errorf("Error wiping channel: %v", err)
+			return
+		}
+	case <-p.quit:
+		return
 	}
 
-	p.server.breachArbiter.settledContracts <- chanPoint
+	p.server.breachArbiter.settledContracts <- channel.ChannelPoint()
 }
 
 // wipeChannel removes the passed channel from all indexes associated with the
