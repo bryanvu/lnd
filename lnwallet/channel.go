@@ -2440,34 +2440,31 @@ func (lc *LightningChannel) ForceClose() (*ForceCloseSummary, error) {
 	}, nil
 }
 
-// InitCooperativeClose initiates a cooperative closure of an active lightning
-// channel. This method should only be executed once all pending HTLCs (if any)
-// on the channel have been cleared/removed. Upon completion, the source
-// channel will shift into the "closing" state, which indicates that all
-// incoming/outgoing HTLC requests should be rejected. A signature for the
-// closing transaction, and the txid of the closing transaction are returned.
-// The initiator of the channel closure should then watch the blockchain for a
-// confirmation of the closing transaction before considering the channel
-// terminated. In the case of an unresponsive remote party, the initiator can
-// either choose to execute a force closure, or backoff for a period of time,
-// and retry the cooperative closure.
+// CreateCloseProposal is used by both parties in a cooperative channel close
+// workflow to generate proposed close transactions and signatures. This method
+// should only be executed once all pending HTLCs (if any) on the channel have
+// been cleared/removed. Upon completion, the source channel will shift into
+// the "closing" state, which indicates that all incoming/outgoing HTLC
+// requests should be rejected. A signature for the closing transaction is
+// returned.
 //
 // TODO(roasbeef): caller should initiate signal to reject all incoming HTLCs,
 // settle any inflight.
-func (lc *LightningChannel) InitCooperativeClose() ([]byte, *chainhash.Hash, error) {
+func (lc *LightningChannel) CreateCloseProposal(feeRate uint64) ([]byte, error) {
 	lc.Lock()
 	defer lc.Unlock()
 
 	// If we're already closing the channel, then ignore this request.
 	if lc.status == channelClosing || lc.status == channelClosed {
 		// TODO(roasbeef): check to ensure no pending payments
-		return nil, nil, ErrChanClosing
+		return nil, ErrChanClosing
 	}
 
 	closeTx := CreateCooperativeCloseTx(lc.fundingTxIn,
 		lc.channelState.OurDustLimit, lc.channelState.TheirDustLimit,
 		lc.channelState.OurBalance, lc.channelState.TheirBalance,
-		lc.channelState.OurDeliveryScript, lc.channelState.TheirDeliveryScript,
+		lc.channelState.OurDeliveryScript,
+		lc.channelState.TheirDeliveryScript,
 		lc.channelState.IsInitiator)
 
 	// Ensure that the transaction doesn't explicitly violate any
@@ -2475,7 +2472,7 @@ func (lc *LightningChannel) InitCooperativeClose() ([]byte, *chainhash.Hash, err
 	// negative output.
 	tx := btcutil.NewTx(closeTx)
 	if err := blockchain.CheckTransactionSanity(tx); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Finally, sign the completed cooperative closure transaction. As the
@@ -2483,33 +2480,31 @@ func (lc *LightningChannel) InitCooperativeClose() ([]byte, *chainhash.Hash, err
 	// using the generated txid to be notified once the closure transaction
 	// has been confirmed.
 	lc.signDesc.SigHashes = txscript.NewTxSigHashes(closeTx)
-	closeSig, err := lc.signer.SignOutputRaw(closeTx, lc.signDesc)
+	sig, err := lc.signer.SignOutputRaw(closeTx, lc.signDesc)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// As everything checks out, indicate in the channel status that a
 	// channel closure has been initiated.
 	lc.status = channelClosing
 
-	closeTxSha := closeTx.TxHash()
-	return closeSig, &closeTxSha, nil
+	return sig, nil
 }
 
 // CompleteCooperativeClose completes the cooperative closure of the target
-// active lightning channel. This method should be called in response to the
-// remote node initiating a cooperative channel closure. A fully signed closure
-// transaction is returned. It is the duty of the responding node to broadcast
-// a signed+valid closure transaction to the network.
+// active lightning channel. A fully signed closure transaction as well as the
+// signature itself are returned.
 //
-// NOTE: The passed remote sig is expected to be a fully complete signature
-// including the proper sighash byte.
-func (lc *LightningChannel) CompleteCooperativeClose(remoteSig []byte) (*wire.MsgTx, error) {
+// NOTE: The passed local and remote sigs are expected to be fully complete
+// signatures including the proper sighash byte.
+func (lc *LightningChannel) CompleteCooperativeClose(localSig,
+	remoteSig []byte, proposedFee uint64) (*wire.MsgTx, error) {
 	lc.Lock()
 	defer lc.Unlock()
 
-	// If we're already closing the channel, then ignore this request.
-	if lc.status == channelClosing || lc.status == channelClosed {
+	// If the channel is already closed, then ignore this request.
+	if lc.status == channelClosed {
 		// TODO(roasbeef): check to ensure no pending payments
 		return nil, ErrChanClosing
 	}
@@ -2520,7 +2515,8 @@ func (lc *LightningChannel) CompleteCooperativeClose(remoteSig []byte) (*wire.Ms
 	closeTx := CreateCooperativeCloseTx(lc.fundingTxIn,
 		lc.channelState.OurDustLimit, lc.channelState.TheirDustLimit,
 		lc.channelState.OurBalance, lc.channelState.TheirBalance,
-		lc.channelState.OurDeliveryScript, lc.channelState.TheirDeliveryScript,
+		lc.channelState.OurDeliveryScript,
+		lc.channelState.TheirDeliveryScript,
 		lc.channelState.IsInitiator)
 
 	// Ensure that the transaction doesn't explicitly validate any
@@ -2530,23 +2526,14 @@ func (lc *LightningChannel) CompleteCooperativeClose(remoteSig []byte) (*wire.Ms
 	if err := blockchain.CheckTransactionSanity(tx); err != nil {
 		return nil, err
 	}
-
-	// With the transaction created, we can finally generate our half of
-	// the 2-of-2 multi-sig needed to redeem the funding output.
 	hashCache := txscript.NewTxSigHashes(closeTx)
-	lc.signDesc.SigHashes = hashCache
-	closeSig, err := lc.signer.SignOutputRaw(closeTx, lc.signDesc)
-	if err != nil {
-		return nil, err
-	}
 
 	// Finally, construct the witness stack minding the order of the
 	// pubkeys+sigs on the stack.
 	ourKey := lc.channelState.OurMultiSigKey.SerializeCompressed()
 	theirKey := lc.channelState.TheirMultiSigKey.SerializeCompressed()
-	ourSig := append(closeSig, byte(txscript.SigHashAll))
-	witness := SpendMultiSig(lc.signDesc.WitnessScript, ourKey, ourSig,
-		theirKey, remoteSig)
+	witness := SpendMultiSig(lc.signDesc.WitnessScript, ourKey,
+		localSig, theirKey, remoteSig)
 	closeTx.TxIn[0].Witness = witness
 
 	// Validate the finalized transaction to ensure the output script is
