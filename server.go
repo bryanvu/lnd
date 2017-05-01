@@ -296,7 +296,7 @@ func newServer(listenAddrs []string, notifier chainntnfs.ChainNotifier,
 			for _, channel := range dbChannels {
 				if chanID.IsChanPoint(channel.ChanID) {
 					return lnwallet.NewLightningChannel(wallet.Signer,
-						notifier, channel)
+						notifier, wallet, channel)
 				}
 			}
 

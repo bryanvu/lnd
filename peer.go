@@ -284,7 +284,7 @@ func (p *peer) loadActiveChannels(chans []*channeldb.OpenChannel) error {
 		}
 
 		lnChan, err := lnwallet.NewLightningChannel(p.server.lnwallet.Signer,
-			p.server.chainNotifier, dbChan)
+			p.server.chainNotifier, p.server.lnwallet, dbChan)
 		if err != nil {
 			return err
 		}

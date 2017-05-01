@@ -939,7 +939,8 @@ func (f *fundingManager) waitForFundingConfirmation(completeChan *channeldb.Open
 
 	// With the channel marked open, we'll create the state-machine object
 	// which wraps the database state.
-	channel, err := lnwallet.NewLightningChannel(nil, nil, completeChan)
+	channel, err := lnwallet.NewLightningChannel(nil, nil, f.cfg.Wallet,
+		completeChan)
 	if err != nil {
 		fndgLog.Errorf("error creating new lightning channel: %v", err)
 		return

@@ -107,7 +107,7 @@ func (b *breachArbiter) Start() error {
 		len(activeChannels))
 	for i, chanState := range activeChannels {
 		channel, err := lnwallet.NewLightningChannel(nil, b.notifier,
-			chanState)
+			b.wallet, chanState)
 		if err != nil {
 			brarLog.Errorf("unable to load channel from disk")
 			return err
