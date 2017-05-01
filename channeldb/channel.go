@@ -66,7 +66,7 @@ var (
 	updatePrefix         = []byte("uup")
 	satSentPrefix        = []byte("ssp")
 	satReceivedPrefix    = []byte("srp")
-	netFeesPrefix        = []byte("ntp")
+	commitFeePrefix      = []byte("cfp")
 	isPendingPrefix      = []byte("pdg")
 
 	// chanIDKey stores the node, and channelID for an active channel.
@@ -173,6 +173,13 @@ type OpenChannel struct {
 	// TheirBalance is the current available settled balance within the
 	// channel directly spendable by the remote node.
 	TheirBalance btcutil.Amount
+
+	// CommitFee is the amount calculated to be paid in fees for the
+	// current set of commitment transactions. The fee amount is
+	// persisted with the channel in order to allow the fee amount to be
+	// removed and recalculated with each channel state update, including
+	// updates that happen after a system restart.
+	CommitFee btcutil.Amount
 
 	// OurCommitKey is the latest version of the commitment state,
 	// broadcast able by us.
@@ -402,6 +409,7 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *wire.MsgTx,
 		c.TheirBalance = delta.RemoteBalance
 		c.NumUpdates = delta.UpdateNum
 		c.Htlcs = delta.Htlcs
+		c.CommitFee = delta.CommitFee
 
 		// First we'll write out the current latest dynamic channel
 		// state: the current channel balance, the number of updates,
@@ -414,6 +422,9 @@ func (c *OpenChannel) UpdateCommitment(newCommitment *wire.MsgTx,
 			return err
 		}
 		if err := putChanNumUpdates(chanBucket, c); err != nil {
+			return err
+		}
+		if err := putChanCommitFee(chanBucket, c); err != nil {
 			return err
 		}
 		if err := putChanCommitTxns(nodeChanBucket, c); err != nil {
@@ -483,6 +494,10 @@ type ChannelDelta struct {
 	// RemoteBalanceis the balance of the remote node at this particular
 	// update number.
 	RemoteBalance btcutil.Amount
+
+	// CommitFee is the fee that has been subtracted from the channel
+	// initiator's balance at this point in the commitment chain.
+	CommitFee btcutil.Amount
 
 	// UpdateNum is the update number that this ChannelDelta represents the
 	// total number of commitment updates to this point. This can be viewed
@@ -811,6 +826,9 @@ func putOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 	if err := putChanIsPending(openChanBucket, channel); err != nil {
 		return err
 	}
+	if err := putChanCommitFee(openChanBucket, channel); err != nil {
+		return err
+	}
 
 	// Next, write out the fields of the channel update less frequently.
 	if err := putChannelIDs(nodeChanBucket, channel); err != nil {
@@ -898,6 +916,9 @@ func fetchOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 	if err = fetchChanIsPending(openChanBucket, channel); err != nil {
 		return nil, err
 	}
+	if err = fetchChanCommitFee(openChanBucket, channel); err != nil {
+		return nil, err
+	}
 
 	return channel, nil
 }
@@ -926,6 +947,9 @@ func deleteOpenChannel(openChanBucket *bolt.Bucket, nodeChanBucket *bolt.Bucket,
 		return err
 	}
 	if err := deleteChanIsPending(openChanBucket, channelID); err != nil {
+		return err
+	}
+	if err := deleteChanCommitFee(openChanBucket, channelID); err != nil {
 		return err
 	}
 
@@ -1366,6 +1390,46 @@ func deleteChanCommitKeys(nodeChanBucket *bolt.Bucket, chanID []byte) error {
 	copy(commitKey[:3], commitKeys)
 	copy(commitKey[3:], chanID)
 	return nodeChanBucket.Delete(commitKey)
+}
+
+func putChanCommitFee(openChanBucket *bolt.Bucket, channel *OpenChannel) error {
+	scratch := make([]byte, 8)
+	byteOrder.PutUint64(scratch, uint64(channel.CommitFee))
+
+	var b bytes.Buffer
+	if err := writeOutpoint(&b, channel.ChanID); err != nil {
+		return err
+	}
+
+	keyPrefix := make([]byte, 3+b.Len())
+	copy(keyPrefix, commitFeePrefix)
+	copy(keyPrefix[3:], b.Bytes())
+
+	return openChanBucket.Put(keyPrefix, scratch)
+}
+
+func fetchChanCommitFee(openChanBucket *bolt.Bucket, channel *OpenChannel) error {
+	var b bytes.Buffer
+	if err := writeOutpoint(&b, channel.ChanID); err != nil {
+		return err
+	}
+
+	keyPrefix := make([]byte, 3+b.Len())
+	copy(keyPrefix, commitFeePrefix)
+	copy(keyPrefix[3:], b.Bytes())
+
+	commitFeeBytes := openChanBucket.Get(keyPrefix)
+	channel.CommitFee = btcutil.Amount(byteOrder.Uint64(commitFeeBytes))
+
+	return nil
+}
+
+func deleteChanCommitFee(openChanBucket *bolt.Bucket, chanID []byte) error {
+	commitFeeKey := make([]byte, 3+len(chanID))
+	copy(commitFeeKey, commitFeePrefix)
+	copy(commitFeeKey[3:], chanID)
+
+	return openChanBucket.Delete(commitFeeKey)
 }
 
 func fetchChanCommitKeys(nodeChanBucket *bolt.Bucket, channel *OpenChannel) error {
@@ -1896,6 +1960,11 @@ func serializeChannelDelta(w io.Writer, delta *ChannelDelta) error {
 		}
 	}
 
+	byteOrder.PutUint64(scratch[:], uint64(delta.CommitFee))
+	if _, err := w.Write(scratch[:]); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1934,6 +2003,10 @@ func deserializeChannelDelta(r io.Reader) (*ChannelDelta, error) {
 
 		delta.Htlcs[i] = htlc
 	}
+	if _, err := r.Read(scratch[:]); err != nil {
+		return nil, err
+	}
+	delta.CommitFee = btcutil.Amount(byteOrder.Uint64(scratch[:]))
 
 	return delta, nil
 }
