@@ -53,5 +53,7 @@ lnd \
     "--$CHAIN.rpchost"="blockchain" \
     "--$CHAIN.rpcuser"="$RPCUSER" \
     "--$CHAIN.rpcpass"="$RPCPASS" \
+    --neutrino.active \
+    --neutrino.connect=138.197.207.236:18333 \
     --debuglevel="$DEBUG" \
     "$@"
